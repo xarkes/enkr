@@ -875,7 +875,12 @@ impl EnkrState {
     }
 
     pub fn shutdown(&mut self) {
-        self.disconnect_sync();
+        // Not `disconnect_sync`: on the way out we wait for the engine, so it
+        // gets to close the connection rather than having the socket yanked
+        // out from under it when the process exits.
+        if let Some(sync) = self.sync.take() {
+            sync.shutdown();
+        }
         self.persist_last_session();
         if let Err(err) = self.notes.flush_dirty() {
             self.record_persistence_error(err.to_string());

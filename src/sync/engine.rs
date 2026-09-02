@@ -63,6 +63,13 @@ const MAX_DEFERRED_FRAMES: usize = 1024;
 /// instead of queueing behind one huge batch.
 const SUBSCRIBE_BATCH: usize = 512;
 
+/// How long the shutdown path waits for the WebSocket closing handshake (our
+/// Close frame out, the relay's Close back). Short on purpose: this runs while
+/// the user is closing the window, so a relay that never answers must cost a
+/// blink, not a hang - the socket dies with the process either way, the
+/// handshake only decides whether the relay logs that as an error.
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Why a connection attempt failed, and whether trying again could help.
 enum HandshakeFailure {
     /// Transient — the engine backs off and retries.
@@ -319,6 +326,39 @@ impl Engine {
         let doc_ids: Vec<Uuid> = self.docs.keys().copied().collect();
         for doc_id in doc_ids {
             self.flush_doc(doc_id).await;
+        }
+        self.close_ws().await;
+    }
+
+    /// End the connection with a WebSocket closing handshake instead of just
+    /// dropping the socket. Both sides read a bare drop as a fault - the relay
+    /// logs it as `connection closed with error: WebSocket protocol error:
+    /// Connection reset without closing handshake` and counts it a failed
+    /// connection - when a user quitting the app is the most ordinary ending
+    /// there is. A Close frame is what says "this was deliberate".
+    ///
+    /// Best-effort and bounded by [`CLOSE_TIMEOUT`]: nothing here is worth
+    /// delaying app exit for, and the frames already pushed are covered by the
+    /// notes DB + `needs_push` regardless.
+    async fn close_ws(&mut self) {
+        let (Some(mut sink), Some(mut stream)) = (self.sink.take(), self.stream.take()) else {
+            return;
+        };
+        let handshake = async {
+            if let Err(err) = sink.close().await {
+                log::debug!("sync: close frame not sent: {err}");
+                return;
+            }
+            // The handshake isn't finished until the relay's own Close comes
+            // back (or the stream ends): returning at `sink.close()` and
+            // letting the process exit can still cut the connection before the
+            // relay has read our Close, which is the very error we're avoiding.
+            // Anything else arriving in the meantime is deliberately dropped -
+            // we are leaving, and the UI is already gone.
+            while let Some(Ok(_)) = stream.next().await {}
+        };
+        if super::clock::timeout(CLOSE_TIMEOUT, handshake).await.is_err() {
+            log::debug!("sync: server did not complete the close handshake in time");
         }
     }
 

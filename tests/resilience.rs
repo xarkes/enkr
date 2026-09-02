@@ -774,3 +774,40 @@ async fn a_device_cannot_open_unbounded_connections() {
     drop(reconnected);
     let _ = std::fs::remove_file(&key);
 }
+
+/// Quitting must end the connection with a WebSocket closing handshake.
+///
+/// A client that simply vanishes is indistinguishable from one that crashed:
+/// the relay logs `connection closed with error: WebSocket protocol error:
+/// Connection reset without closing handshake` and counts a failed connection
+/// — so the one metric that is supposed to mean "something is wrong" fires
+/// every single time a user closes the app, and stops meaning anything.
+#[tokio::test]
+#[ignore = "resilience"]
+async fn quitting_closes_the_connection_with_a_handshake() {
+    let server = TestServer::start_default().await;
+    let health = format!("http://{}/health", server.addr);
+
+    let client = server.client();
+    wait_connected(&client).await;
+    client.shutdown().await;
+
+    // The relay tears the connection down asynchronously, so wait for it to be
+    // gone before reading the failure counter reported alongside it.
+    let deadline = Instant::now() + NOTICE_BUDGET;
+    loop {
+        let body = http_get(&health).await;
+        if body.contains("\"connections\":0") {
+            assert!(
+                body.contains("\"failed_connections\":0"),
+                "a graceful quit was counted as a failed connection: {body}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the connection never closed: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

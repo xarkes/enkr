@@ -391,7 +391,11 @@ pub struct SyncClient {
     events: broadcast::Sender<SyncEvent>,
     device_pk: DevicePk,
     kex_pk: KexPk,
-    handle: Option<thread::EngineHandle>,
+    /// Behind a `Mutex<Option<_>>` rather than owned outright because the app
+    /// holds the client through an `Arc` (the GUI bridge) and still has to be
+    /// able to *wait* for the engine at exit - see [`Self::shutdown_blocking`].
+    /// Taken by whichever shutdown wins; the rest then have nothing to join.
+    handle: std::sync::Mutex<Option<thread::EngineHandle>>,
 }
 
 impl SyncClient {
@@ -417,7 +421,7 @@ impl SyncClient {
             events,
             device_pk,
             kex_pk,
-            handle: Some(handle),
+            handle: std::sync::Mutex::new(Some(handle)),
         })
     }
 
@@ -671,9 +675,29 @@ impl SyncClient {
     /// Flush and stop the sync engine. Blocks until it exits on native;
     /// best-effort on wasm32, where nothing can block waiting for it (see
     /// `thread::EngineHandle::join`).
-    pub fn shutdown(mut self) {
+    pub fn shutdown(self) {
+        self.shutdown_blocking();
+    }
+
+    /// [`Self::shutdown`] for a client held behind a shared `Arc`, which can't
+    /// be consumed: stop the engine and *wait* for it to finish flushing and
+    /// closing the connection.
+    ///
+    /// This is the app-exit shutdown. [`Self::request_shutdown`] only asks;
+    /// on the way out of `main` nothing else keeps the process alive long
+    /// enough for the engine to answer, so the socket dies mid-drain and the
+    /// relay sees a reset instead of a close. Waiting here is what makes the
+    /// engine's own closing handshake reach the wire.
+    pub fn shutdown_blocking(&self) {
         let _ = self.cmd_tx.send(Cmd::Shutdown);
-        if let Some(handle) = self.handle.take() {
+        // A poisoned lock means some other thread panicked mid-shutdown; there
+        // is nothing left to join, and panicking again on the way out helps
+        // nobody.
+        let handle = match self.handle.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(_) => None,
+        };
+        if let Some(handle) = handle {
             handle.join();
         }
     }

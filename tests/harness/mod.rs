@@ -284,7 +284,19 @@ impl TestClient {
         Ok(body.get_string(&local.transact()))
     }
 
-    pub fn shutdown(self) {}
+    /// Stop the engine and wait for it to finish - flush, then the WebSocket
+    /// closing handshake, which is what makes the relay log a clean goodbye
+    /// instead of `Connection reset without closing handshake`.
+    ///
+    /// On a blocking pool thread because the relay under test shares this
+    /// test's runtime: blocking the runtime here is exactly what would stop
+    /// the server answering the Close we are waiting for.
+    pub async fn shutdown(self) {
+        let client = self.client.clone();
+        // Stops the pump task; the engine is stopped by the join below.
+        drop(self);
+        let _ = tokio::task::spawn_blocking(move || client.shutdown_blocking()).await;
+    }
 }
 
 impl Drop for TestClient {

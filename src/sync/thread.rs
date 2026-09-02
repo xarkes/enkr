@@ -29,18 +29,33 @@ use enkr_proto::crypto::DeviceIdentity;
 use super::engine::Engine;
 use super::{Cmd, SyncConfig, SyncEvent};
 
+/// Ceiling on how long [`EngineHandle::join`] waits for the engine to wind
+/// down. The wind-down itself is quick — flush the debounce buffers, close the
+/// socket (bounded separately, and tighter, inside the engine) — but
+/// `Cmd::Shutdown` is only *seen* between awaits, and the engine may be part
+/// way through a connection attempt when it arrives: the connect and each
+/// handshake read are 5s apiece. Nobody should wait that out to quit an app,
+/// and there is nothing to close politely on a connection that never came up,
+/// so past this the engine is left to the process exit.
+#[cfg(not(target_arch = "wasm32"))]
+const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct EngineHandle {
-    thread: Option<std::thread::JoinHandle<()>>,
+    /// Sent (or, if the thread died some other way, disconnected) once
+    /// `Engine::run` has returned. A plain `JoinHandle` can't be waited on
+    /// with a deadline, which is the whole requirement here.
+    done: std::sync::mpsc::Receiver<()>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl EngineHandle {
-    /// Blocks until the engine thread exits (it already saw `Cmd::Shutdown`
-    /// by the time this is called — see `SyncClient::shutdown`).
-    pub(super) fn join(mut self) {
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+    /// Blocks until the engine has finished shutting down — it already saw
+    /// `Cmd::Shutdown` by the time this is called (see
+    /// `SyncClient::shutdown_blocking`) — or [`JOIN_TIMEOUT`] passes.
+    pub(super) fn join(self) {
+        if self.done.recv_timeout(JOIN_TIMEOUT).is_err() {
+            log::warn!("sync engine did not stop within {JOIN_TIMEOUT:?}");
         }
     }
 }
@@ -52,7 +67,10 @@ pub(super) fn spawn_engine(
     cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     events: broadcast::Sender<SyncEvent>,
 ) -> Result<EngineHandle, String> {
-    let thread = std::thread::Builder::new()
+    let (done_tx, done) = std::sync::mpsc::channel();
+    // Detached on purpose: `join` waits on `done_tx` instead, so it can give
+    // up on an engine that is wedged rather than hanging the app's exit.
+    std::thread::Builder::new()
         .name("enkr-sync".into())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -67,11 +85,11 @@ pub(super) fn spawn_engine(
                 }
             };
             runtime.block_on(Engine::new(config, identity, events).run(cmd_rx));
+            // Err = nobody is waiting (no explicit shutdown); normal.
+            let _ = done_tx.send(());
         })
         .map_err(|e| e.to_string())?;
-    Ok(EngineHandle {
-        thread: Some(thread),
-    })
+    Ok(EngineHandle { done })
 }
 
 /// Nothing to join — `spawn_local`'d work has no handle of its own; the

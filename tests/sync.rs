@@ -247,8 +247,8 @@ async fn randomized_interleavings_converge() {
             expected_len,
             "seed {seed}: content lost or duplicated: {text:?}"
         );
-        a.shutdown();
-        b.shutdown();
+        a.shutdown().await;
+        b.shutdown().await;
     }
 }
 
@@ -486,8 +486,8 @@ async fn server_storage_contains_no_plaintext() {
 
     // Snapshot path too: it must be ciphertext like everything else.
     a.flush().await.unwrap();
-    a.shutdown();
-    b.shutdown();
+    a.shutdown().await;
+    b.shutdown().await;
     server.stop().await; // close WAL so the file is complete on disk
 
     let mut blob = std::fs::read(&server.db_path).expect("read server db");

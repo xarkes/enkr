@@ -457,6 +457,21 @@ async fn forward_engine_events(
     }
 }
 
+impl AppSync {
+    /// Stop the engine and *wait* for it to wind down (flush, then close the
+    /// WebSocket properly). For the app's own exit path only, where the
+    /// process is about to disappear: `Drop`'s `request_shutdown` alone just
+    /// asks, and `main` returning kills the engine thread mid-drain, which is
+    /// exactly the abrupt disconnect the relay logs as a protocol error.
+    ///
+    /// A user-initiated disconnect deliberately doesn't come through here: the
+    /// process lives on, so the engine finishes on its own without the UI
+    /// thread waiting on it.
+    pub fn shutdown(&self) {
+        self.client.shutdown_blocking();
+    }
+}
+
 impl Drop for AppSync {
     /// Disconnecting drops the `AppSync`. Stop the engine *now* so it closes
     /// the connection and stops processing inbound server frames (rooms info,
