@@ -1956,6 +1956,94 @@ fn inline_rename_commits_on_enter_and_reverts_on_escape() {
     let _ = original;
 }
 
+/// The new name has to be *on screen* once Enter is pressed, not once
+/// something else happens to wake the loop.
+///
+/// The window only redraws when something asks it to, and a rename is applied
+/// during the build that reports the commit — after the row was already drawn
+/// as an open edit field. Nothing used to ask for the frame that would show
+/// the result, so the field sat there, still holding the typed name, until an
+/// unrelated event (a mouse move, a sync notification) drove another frame.
+#[test]
+fn committing_a_rename_redraws_without_waiting_for_another_event() {
+    let mut harness = UiHarness::new(900.0, 600.0);
+    let mut state = test_state();
+    let space = state.active_space_id;
+    let folder = state.notes.create_folder(space, "Drafts").unwrap();
+
+    state.begin_rename(RenameTarget::Folder(folder));
+    harness.frame(|ui| render(ui, &mut state)); // focuses the field
+    harness.frame(|ui| render(ui, &mut state)); // selects the existing name
+    harness.type_text("Archive");
+
+    // Let every animation the open field started settle, so the only thing
+    // that can ask for a frame afterwards is the commit itself — the state a
+    // field the user has been typing in for a moment is really in.
+    for _ in 0..600 {
+        harness.frame(|ui| render(ui, &mut state));
+        if !harness.ui_mut().take_repaint_request() {
+            break;
+        }
+    }
+    assert!(
+        !harness.ui_mut().take_repaint_request(),
+        "an open rename field should not be asking for frames on its own"
+    );
+
+    harness.key_press(OSKeyCode::KeyEnter);
+    harness.frame(|ui| render(ui, &mut state));
+    assert_eq!(
+        state.notes.folder(&folder).map(|f| f.name.clone()),
+        Some("Archive".to_string()),
+        "Enter commits the rename"
+    );
+    assert!(
+        harness.ui_mut().take_repaint_request(),
+        "the committing frame must ask for the frame that shows the new name"
+    );
+
+    // And that frame is the one showing it: the row is a plain label again.
+    let snapshot = harness.frame(|ui| render(ui, &mut state));
+    assert!(
+        snapshot.try_node("###enkr_folder_rename_field").is_none(),
+        "the edit field should be gone"
+    );
+    assert!(
+        snapshot.try_node("Archive").is_some(),
+        "the row should read as the new name"
+    );
+}
+
+/// Clicking anywhere outside an open palette closes it — including on a
+/// sidebar row, which is clickable in its own right.
+///
+/// The dismissal test reads the frame's presses rather than the event queue:
+/// the queue is consumed, and a palette is built *after* the view it floats
+/// over, so the row behind it took the press first and the palette stayed open
+/// on screen no matter where you clicked.
+#[test]
+fn clicking_a_row_behind_an_open_palette_closes_it() {
+    let mut harness = UiHarness::new(900.0, 600.0);
+    let mut state = EnkrState::with_notes(NoteDatabase::demo());
+    harness.frame(|ui| render(ui, &mut state));
+
+    harness.click("###enkr_space_switcher");
+    harness.frame(|ui| render(ui, &mut state));
+    harness.frame(|ui| render(ui, &mut state));
+    assert!(
+        state.search.is_some(),
+        "the switcher palette should be open"
+    );
+
+    // A note row in the sidebar, well clear of the palette.
+    harness.click("Product roadmap");
+    harness.frame(|ui| render(ui, &mut state));
+    assert!(
+        state.search.is_none(),
+        "a click on the row behind the palette should close it"
+    );
+}
+
 /// One click on a palette row is enough.
 ///
 /// On the DOM backend it was two: pointer state is keyed by `UiKey` but the
