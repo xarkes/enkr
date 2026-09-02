@@ -187,3 +187,8 @@ cdp = ["mae/cdp"]
 opt-level = 3
 codegen-units = 1
 
+# Built against the sibling checkout rather than the pinned revision above:
+# mae and this app are developed together, and a fix in one is only really
+# tested by the other's suite running against it.
+[patch."https://github.com/xarkes/mae.git"]
+mae = { path = "../mae" }

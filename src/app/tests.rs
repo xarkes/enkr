@@ -954,6 +954,81 @@ crate::driver_test!(
     EnkrState::with_notes(NoteDatabase::demo())
 );
 
+/// Tapping into a note must not zoom the page.
+///
+/// iOS Safari zooms in whenever a focused text field's font is under 16px —
+/// mae's text is 14 — and then leaves the whole app scaled up and panned
+/// sideways, so the field no longer spans the window and nothing lines up
+/// again until the page is manually zoomed back out. The fix is to meet the
+/// threshold rather than to disable zooming (`maximum-scale=1` would take the
+/// *user's* pinch away, which is the opposite of what is wanted), so the
+/// assertion is on the size the browser actually computes for a hosted field
+/// on a touch device.
+///
+/// Chrome computes the same `(pointer: coarse)` rule under mobile emulation,
+/// which is what makes this testable without a phone.
+#[cfg(feature = "cdp")]
+#[test]
+fn a_text_field_on_a_touch_device_is_large_enough_not_to_zoom_the_page() {
+    let mut driver = crate::testkit_support::launch_test_harness();
+    // The note title is the smallest hosted field on screen, and the first
+    // one a phone user taps.
+    let title_font = "getComputedStyle(document.querySelector('[data-mae-key=\"###enkr_note_title\"]')).fontSize";
+
+    // Read the mouse-driven size first, on the page as launched: the rule
+    // only raises a size below the threshold on touch, it does not restyle
+    // the app, and this is the "before" that gives the assertion below its
+    // meaning. (Emulation is one-way here — `set_viewport` resizes but
+    // leaves the emulated touchscreen in place.)
+    let fine = font_px(&mut driver, title_font);
+    assert!(
+        fine < 16.0,
+        "the app asks for a size under the threshold here, or this proves nothing: got {fine}px"
+    );
+
+    driver.emulate_mobile_device(390.0, 844.0);
+    let coarse = font_px(&mut driver, title_font);
+    assert!(
+        coarse >= 16.0,
+        "a hosted field on a touch device must be at least 16px or the page zooms on focus, got {coarse}px"
+    );
+}
+
+/// `getComputedStyle(...).fontSize` in pixels, for the expression `expr`.
+#[cfg(feature = "cdp")]
+fn font_px(driver: &mut mae::testkit::cdp::CdpDriver, expr: &str) -> f64 {
+    let value = driver.debug_eval(expr);
+    value
+        .as_str()
+        .and_then(|s| s.trim_end_matches("px").parse().ok())
+        .unwrap_or_else(|| panic!("no font size from {expr:?}: {value:?}"))
+}
+
+/// A chromeless editor has no border on the web either.
+///
+/// The note editor asks for none (`TextAreaOptions::border(false)`, which
+/// omits `DRAW_BORDER` outright — a transparent colour would not do, since
+/// the painted border blends to the accent on focus), and native draws none.
+/// The DOM backend passed a border to every hosted field regardless of the
+/// flag, so on the web the editor sat in a box the native build has never
+/// had.
+#[cfg(feature = "cdp")]
+#[test]
+fn the_web_editor_has_no_border_around_it() {
+    let mut driver = crate::testkit_support::launch_test_harness();
+    let editor_border = "(() => { \
+       const el = document.querySelector('[data-mae-key^=\"###enkr_editor_\"]'); \
+       if (!el) return null; \
+       const s = getComputedStyle(el); \
+       return [s.borderTopWidth, s.borderRightWidth, s.borderBottomWidth, s.borderLeftWidth].join(' '); \
+     })()";
+    assert_eq!(
+        driver.debug_eval(editor_border).as_str(),
+        Some("0px 0px 0px 0px"),
+        "the note editor should have no border on the DOM backend"
+    );
+}
+
 /// On a phone the page lays out at the *device's* width, and pinch-zoom
 /// still works.
 ///
@@ -2330,6 +2405,69 @@ fn focused_note_body<D: UiDriver>(driver: &mut D) -> bool {
         .focused_id()
         .is_some_and(|id| id.starts_with("###enkr_editor_"))
 }
+
+/// Typing an emoji leaves the caret where the emoji ends, so the next
+/// character lands after it.
+///
+/// Runs on the DOM backend for the reason it exists: a browser counts every
+/// text offset it reports — `selectionStart` here — in UTF-16 code units,
+/// while every offset in mae is a char index. An emoji is one char and *two*
+/// code units, so the read-back caret came out one position further along per
+/// emoji and mae then pushed that wrong caret back onto the real field, which
+/// is what made typing on mobile look broken. The same read-back used the
+/// UTF-16 number to slice the UTF-8 buffer, so any non-ASCII character at all
+/// — an accent, not just an emoji — panicked the wasm module outright and the
+/// note stopped accepting input from there on.
+fn typing_an_emoji_keeps_the_caret_in_step<D: UiDriver>(driver: &mut D) {
+    driver.click("###enkr_new_note_btn");
+    for _ in 0..4 {
+        if driver.focused_id().as_deref() == Some("###enkr_note_title") {
+            break;
+        }
+        driver.settle();
+    }
+    // The name is selected on the frame after focus lands; typing before that
+    // appends to the placeholder instead of replacing it.
+    driver.settle();
+
+    // An accent (2 UTF-8 bytes, 1 UTF-16 unit) and an emoji (4 bytes, 2
+    // units) — the two ways a browser offset and a Rust offset disagree.
+    driver.type_text("café\u{1F389}b");
+    for _ in 0..6 {
+        if driver.text_of("###enkr_note_title").as_deref() == Some("café\u{1F389}b") {
+            break;
+        }
+        driver.settle();
+    }
+    assert_eq!(
+        driver.text_of("###enkr_note_title").as_deref(),
+        Some("café\u{1F389}b"),
+        "every character typed should land, in order"
+    );
+
+    // Insert *between* the emoji and what follows it: the caret has to come
+    // back from the field as the char index right after the emoji, not one
+    // past it.
+    driver.key_press(OSKeyCode::KeyLeftArrow);
+    driver.type_text("X");
+    for _ in 0..6 {
+        if driver.text_of("###enkr_note_title").as_deref() == Some("café\u{1F389}Xb") {
+            break;
+        }
+        driver.settle();
+    }
+    assert_eq!(
+        driver.text_of("###enkr_note_title").as_deref(),
+        Some("café\u{1F389}Xb"),
+        "typing after an emoji should insert right after it"
+    );
+}
+crate::driver_test!(
+    typing_an_emoji_keeps_the_caret_in_step,
+    900.0,
+    600.0,
+    EnkrState::with_notes(NoteDatabase::demo())
+);
 
 /// The space palette counts a space's notes from the store, not from the
 /// render loop's per-frame buffer.

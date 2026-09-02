@@ -1584,7 +1584,6 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 [[package]]
 name = "mae"
 version = "0.0.1"
-source = "git+https://github.com/xarkes/mae.git#a70158585932042988a8b0585a95b598eae6d88e"
 dependencies = [
  "console_error_panic_hook",
  "gl",
