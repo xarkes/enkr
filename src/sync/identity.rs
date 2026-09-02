@@ -293,7 +293,13 @@ mod tests {
 
     #[test]
     fn a_mistyped_phrase_is_rejected_rather_than_silently_wrong() {
-        let phrase = seed_to_phrase(&DeviceSeed::generate());
+        // A *fixed* seed, not a generated one. 16 bytes of entropy is a
+        // 12-word phrase, whose checksum is only 4 bits — so one word in
+        // sixteen is a collision that swapping in still parses, and a
+        // generated seed made this test fail roughly 5% of runs. Pinning the
+        // vector keeps it deciding whether the checksum is *checked at all*,
+        // which is what it is actually for.
+        let phrase = seed_to_phrase(&DeviceSeed([0x24; 16]));
         let mut words: Vec<&str> = phrase.split_whitespace().collect();
         // Swap one word for another real word: without BIP39's checksum this
         // would parse into a *different* valid seed, silently handing the user

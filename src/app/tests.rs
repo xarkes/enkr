@@ -830,7 +830,7 @@ crate::driver_test!(
 /// wasm32, so there was no path from a pasted picture to a blob.
 #[cfg(feature = "cdp")]
 #[test]
-#[ignore = "needs enkr/www/build_test_harness.sh run first, plus a local chromium and python3 on PATH"]
+#[ignore = "needs www/build_test_harness.sh run first, plus a local chromium and python3 on PATH"]
 fn pasting_an_image_inserts_a_blob_link() {
     // Smallest valid PNG (1x1) — enough for `imagesize` to read a real
     // header off, which the insert path needs for the link's size hint.
@@ -1184,7 +1184,7 @@ fn top_bar_offers_the_markdown_toggle_on_native() {
 /// asserted on.
 #[cfg(feature = "cdp")]
 #[test]
-#[ignore = "needs enkr/www/build_test_harness.sh run first, plus a local chromium and python3 on PATH"]
+#[ignore = "needs www/build_test_harness.sh run first, plus a local chromium and python3 on PATH"]
 fn device_identity_survives_a_page_reload() {
     const READ_KEY: &str = "window.localStorage.getItem('enkr_device_key')";
 

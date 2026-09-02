@@ -16,7 +16,7 @@ fn main() {
 
     // Rebuild when the checked-out commit changes: HEAD itself (branch switch)
     // and the ref it points at (a new commit on the same branch).
-    let git = Path::new("../.git");
+    let git = Path::new(".git");
     let head = git.join("HEAD");
     if head.exists() {
         println!("cargo:rerun-if-changed={}", head.display());

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the wasm/DOM web version of enkr. Requires:
 # `rustup target add wasm32-unknown-unknown` and `cargo install wasm-bindgen-cli`
-# (version must match the `wasm-bindgen` dependency in enkr/Cargo.toml) done
+# (version must match the `wasm-bindgen` dependency in Cargo.toml) done
 # once beforehand.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -29,6 +29,6 @@ else
     --no-typescript
 fi
 
-echo "Built. Serve the repo root (so www/ can reach ../../assets/) and open /enkr/www/, e.g.:"
+echo "Built. Serve the repo root (so www/ can reach www/assets/) and open /www/, e.g.:"
 echo "  python3 -m http.server 8080"
-echo "  open http://localhost:8080/enkr/www/"
+echo "  open http://localhost:8080/www/"

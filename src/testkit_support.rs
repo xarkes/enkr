@@ -15,18 +15,21 @@ use std::sync::OnceLock;
 /// in it (they run in parallel threads, and the build must not race itself).
 static HARNESS: OnceLock<Result<(), String>> = OnceLock::new();
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+/// The crate root — both the cargo workspace the wasm harness is built in and
+/// the directory `CdpDriver` serves over HTTP (so a page can reach `www/pkg/`
+/// and `www/assets/`).
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Build `src/bin/test_harness.rs` to wasm and run `wasm-bindgen` over it —
-/// the same two steps as `enkr/www/build_test_harness.sh`, in-process so it
+/// the same two steps as `www/build_test_harness.sh`, in-process so it
 /// works without a shell and so a failure surfaces as a test failure with the
 /// real compiler output rather than a stale-bundle pass.
 fn build_harness() -> Result<(), String> {
-    let root = repo_root();
+    let root = crate_root();
     let wasm = root.join("target/wasm32-unknown-unknown/debug/test_harness.wasm");
-    let out_dir = root.join("enkr/www/pkg");
+    let out_dir = root.join("www/pkg");
     let bundle = out_dir.join("test_harness_bg.wasm");
 
     // Safe to invoke cargo from here: by the time a test body runs, the outer
@@ -40,8 +43,6 @@ fn build_harness() -> Result<(), String> {
             "build",
             "--target",
             "wasm32-unknown-unknown",
-            "-p",
-            "enkr",
             "--bin",
             "test_harness",
         ])
@@ -71,7 +72,7 @@ fn build_harness() -> Result<(), String> {
             format!(
                 "could not run `wasm-bindgen`: {err}.\n\
                  Install it with `cargo install wasm-bindgen-cli` at the version \
-                 matching enkr/Cargo.toml's `wasm-bindgen` dependency."
+                 matching Cargo.toml's `wasm-bindgen` dependency."
             )
         })?;
     if !status.success() {
@@ -120,21 +121,21 @@ pub fn launch_test_harness_sized(width: f32, height: f32) -> mae::testkit::cdp::
 /// `src/bin/test_harness.rs`. Test-only, exactly like the harness itself.
 pub fn launch_test_harness_with_query(query: &str) -> mae::testkit::cdp::CdpDriver {
     ensure_harness_built();
-    let root = repo_root();
-    mae::testkit::cdp::CdpDriver::launch(&root, &format!("/enkr/www/test_harness.html{query}"))
+    let root = crate_root();
+    mae::testkit::cdp::CdpDriver::launch(&root, &format!("/www/test_harness.html{query}"))
 }
 
 /// Launches the *real* deployed web app (`src/main.rs`'s wasm entry point,
-/// as served from `enkr/www/`) rather than the fixture harness above.
+/// as served from `www/`) rather than the fixture harness above.
 ///
 /// Needed by anything testing persistence: the harness seeds
 /// `NoteDatabase::demo()`, which has no store behind it at all, so nothing
-/// it does ever reaches IndexedDB. Run `enkr/www/build.sh` first — unlike the
+/// it does ever reaches IndexedDB. Run `www/build.sh` first — unlike the
 /// harness this is not rebuilt automatically, because it is the shipping bundle
 /// and building it is the deploy step, not a test step.
 pub fn launch_web_app() -> mae::testkit::cdp::CdpDriver {
-    let root = repo_root();
-    let pkg = root.join("enkr/www/pkg/enkr.js");
-    assert!(pkg.exists(), "run enkr/www/build.sh first");
-    mae::testkit::cdp::CdpDriver::launch(&root, "/enkr/www/")
+    let root = crate_root();
+    let pkg = root.join("www/pkg/enkr.js");
+    assert!(pkg.exists(), "run www/build.sh first");
+    mae::testkit::cdp::CdpDriver::launch(&root, "/www/")
 }

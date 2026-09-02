@@ -3665,7 +3665,7 @@ mod wasm_store_tests {
     /// regression there would still round-trip correctly while quietly
     /// costing all of that again.
     #[test]
-    #[ignore = "needs enkr/www/build.sh run first, plus a local chromium and python3 on PATH"]
+    #[ignore = "needs www/build.sh run first, plus a local chromium and python3 on PATH"]
     fn blob_bytes_are_stored_as_binary_and_survive_a_reload() {
         const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         /// The stored blob row's shape: what `bytes` actually is, and how
@@ -3755,7 +3755,7 @@ mod wasm_store_tests {
     }
 
     #[test]
-    #[ignore = "needs enkr/www/build.sh run first, plus a local chromium and python3 on PATH"]
+    #[ignore = "needs www/build.sh run first, plus a local chromium and python3 on PATH"]
     fn records_are_stored_one_per_item_and_survive_a_reload() {
         let mut driver = crate::testkit_support::launch_web_app();
 
