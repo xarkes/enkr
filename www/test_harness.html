@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- Without this a mobile browser lays the page out in a ~980 CSS-px
+     viewport and scales the result down to fit: `100%` below then resolves
+     to ~980px, so mae is told the window is desktop-sized, lays out the
+     desktop UI, and the browser shrinks it to illegibility.
+     No `user-scalable=no` and no `maximum-scale`: pinch-zoom stays available
+     (see `touch-action: pinch-zoom` in os/wasm.rs).
+     `interactive-widget=resizes-content` makes the on-screen keyboard shrink
+     the *layout* viewport, which the container's ResizeObserver already
+     reacts to — Chrome/Android only, see os/wasm.rs's visualViewport
+     listener for the Safari half. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+<title>Enkr — CdpDriver test harness</title>
+<style>
+  @font-face {
+    font-family: 'Mae Sans';
+    src: url('../../assets/NotoSans-Regular.ttf') format('truetype');
+  }
+  @font-face {
+    font-family: 'Mae Icons';
+    src: url('../../assets/MaterialIcons-Regular.ttf') format('truetype');
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #14161a;
+    font-family: 'Mae Sans', sans-serif;
+    /* The app owns every gesture inside it; nothing should rubber-band the
+       page itself, and a phone must not re-size the app's text behind its
+       back (the layout is computed in Rust from these exact sizes). */
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+  }
+  #mae-root {
+    /* `100%`, not `100vw`: `100vw` includes the scrollbar gutter and
+       overflows by its width whenever one exists. */
+    width: 100%;
+    /* `100vh` is the *large* viewport on mobile — the height the page gets
+       once the URL bar has scrolled away — so the app's footer sits under
+       browser chrome until it does. `100dvh` is that height *now*; the
+       `100vh` line stays as the fallback for browsers without `dvh`. */
+    height: 100vh;
+    height: 100dvh;
+  }
+</style>
+</head>
+<body>
+  <div id="mae-root"></div>
+  <script type="module">
+    import init from './pkg/test_harness.js';
+    init();
+  </script>
+</body>
+</html>

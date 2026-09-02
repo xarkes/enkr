@@ -1,0 +1,189 @@
+[package]
+name = "enkr"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+enkr-proto = { git = "https://github.com/xarkes/enkr-proto.git" }
+yrs = "0.26.0"
+# std::time::Instant/SystemTime unconditionally panic on wasm32-unknown-
+# unknown ("time not implemented on this platform" — no wall-clock/monotonic
+# syscall backs them there). web-time is a drop-in replacement: identical
+# API, transparently re-exporting real std::time on native and backed by
+# `performance.now()`/`Date.now()` on wasm32 — so every call site just
+# imports `web_time::{Instant, SystemTime, UNIX_EPOCH}` instead of
+# `std::time::{...}` and needs no other change.
+web-time = "1"
+# "serde": Space/Folder/Blob/NoteSnapshot (note.rs) derive Serialize/
+# Deserialize unconditionally — needed only by the wasm32 IndexedDB store
+# (see note.rs's `WasmDocument`), but deriving is free on native too, so
+# there's no reason to cfg-split the derives themselves from the structs
+# they're on.
+# "rng-getrandom": on wasm32, uuid's `v4` needs an explicit randomness
+# backend picked (a hard compile error otherwise) — `getrandom` matches the
+# `getrandom`/`getrandom4` deps already configured below for wasm32, rather
+# than pulling in uuid's own separate wasm-bindgen-based `js` path or the
+# `rand` crate via `rng-rand`. A no-op addition on native, which resolves
+# uuid's randomness some other way regardless.
+uuid = { version = "1", features = ["v4", "serde", "rng-getrandom"] }
+serde = { version = "1", features = ["derive"] }
+# "sink": Sink/SinkExt/SplitSink/SplitStream (sync/engine.rs, sync/transport/
+# *.rs) — previously reached transitively via some other dependency (present
+# only in the native graph), so this only surfaced once the wasm32 graph no
+# longer pulled that in.
+futures-util = { version = "0.3", features = ["sink"] }
+log = "0.4"
+
+# The in-process sync server for the `--showcase` demo (feature `testkit`).
+enkr-syncd = { path = "../enkr-syncd", optional = true }
+bip39 = { version = "2", default-features = false, features = ["std"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mae = { git = "https://github.com/xarkes/mae.git" }
+# Pinned to 0.32 so libsqlite3-sys unifies with sqlx-sqlite (enkr-syncd); both
+# link the native sqlite3 and cargo allows only one linking version per graph.
+# Native only — `bundled` compiles SQLite's C sources via `cc`, which has no
+# wasm32-unknown-unknown story; note_store_wasm.rs is the wasm32 persistence
+# backend instead (IndexedDB via web-sys, see note.rs's `finish_open`).
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+# `rustls-tls-webpki-roots` enables wss:// (TLS) via pure-Rust rustls with
+# bundled Mozilla roots — no OpenSSL / system cert-store dependency, so it works
+# the same across platforms.
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+# tokio-tungstenite pulls rustls with default-features off, so no crypto provider
+# is compiled in and rustls can't pick one at runtime. Enable exactly `ring`
+# (not the default aws-lc-rs, which needs a C toolchain) and install it at
+# startup; one provider keeps the choice unambiguous and cross-platform.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Decode pasted/uploaded images (PNG, JPEG; plus TIFF for macOS screenshot
+# clipboards) to RGBA for display, and re-encode pastes to PNG for storage.
+# Native only — the wasm/dom build drops image support entirely (paste is
+# already a no-op there; WYSIWYG markdown rendering and the blob image viewer
+# are `#[cfg(not(target_arch = "wasm32"))]`'d, see note.rs/app.rs).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+# Canonicalise imported text to NFC: macOS often stores/produces decomposed
+# (NFD) accents (é = e + combining ´) while Windows uses precomposed (NFC) é.
+# Mixed forms split graphemes across the caret/wrap logic, so we normalise once.
+# Native only — its one call site (`note.rs::read_text_file`) backs importing
+# notes from a local folder via `std::fs`, which doesn't exist on wasm32.
+unicode-normalization = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+mae = { git = "https://github.com/xarkes/mae.git", default-features = false, features = ["dom"] }
+# Tokio's wasm32 support covers `rt`/`sync`/`macros`/`time` (not `net` — no
+# raw sockets in a browser sandbox; see `sync/transport.rs`, which swaps in a
+# `web_sys::WebSocket`-backed transport instead). `sync` (mpsc/broadcast/
+# oneshot) needs no runtime/executor context to poll — `sync/engine.rs`'s
+# protocol logic keeps using them unchanged, driven by
+# `wasm_bindgen_futures::spawn_local` instead of `Runtime::block_on` (which
+# panics-on-idle on wasm rather than blocking — see `sync/mod.rs`).
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# Turns a wasm panic's opaque "unreachable executed" into the real Rust panic
+# message + backtrace in the browser console. `main.rs`-only (mae itself
+# already sets this for its own demo; enkr needs its own since it has its
+# own `fn main`).
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+  "WebSocket",
+  "MessageEvent",
+  "ErrorEvent",
+  "CloseEvent",
+  "BinaryType",
+  "Window",
+  "IdbFactory",
+  "IdbOpenDbRequest",
+  "IdbDatabase",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "IdbObjectStore",
+  "IdbRequest",
+  "IdbVersionChangeEvent",
+  "DomException",
+  "DomStringList",
+  # "Document"/"Element"/"HtmlElement"/"HtmlInputElement"/"CssStyleDeclaration"/
+  # "Node" are already pulled in transitively by `mae`'s own wasm32 web-sys
+  # deps (features union across a shared crate version) — only "File"/
+  # "FileList" are new here, for `insert_image_from_file`'s browser file
+  # picker (see app.rs).
+  "File",
+  "FileList",
+  # `window.localStorage`, where the device identity lives on wasm32 — see
+  # `sync/identity.rs` for why that (and not IndexedDB, which the note
+  # database uses) is the right home for a 64-byte key.
+  "Storage",
+  # `window.location.search`, read only by the wasm32 test-harness binary
+  # (`src/bin/test_harness.rs`) for its `?server=`/`?nick=` parameters. A
+  # feature, not a dependency, so it costs the shipped bundle nothing beyond
+  # the two accessors themselves.
+  "Location",
+] }
+# The wasm32 persistence backend (note_store_wasm.rs) serializes the whole
+# note database to one JSON blob per IndexedDB record — see its doc comment
+# for why that's simpler and safer than replicating SqliteNoteStore's 5-table
+# relational schema (foreign keys, position ordering, migrations) in IndexedDB.
+serde_json = "1"
+# `enkr-proto`'s crypto stack (chacha20poly1305/crypto_box/ed25519-dalek, via
+# rand_core 0.6) pulls getrandom 0.2, which needs its own "js" feature to call
+# `crypto.getRandomValues` — a plain Cargo feature, no rustflags needed (unlike
+# 0.3+ below).
+getrandom = { version = "0.2", features = ["js"] }
+# `uuid`'s `v4` feature separately pulls getrandom 0.4 (SemVer-incompatible
+# with the 0.2 line above, so both exist in the graph at once — Cargo allows
+# this via the `package` rename). 0.3+ picks its backend via a `--cfg` rather
+# than relying on the feature alone; see `.cargo/config.toml`'s
+# `getrandom_backend = "wasm_js"` rustflag.
+getrandom4 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+# `tokio::time` (interval/timeout/sleep) calls `std::time::Instant::now()`
+# *internally* (inside the tokio crate itself — see `sync/clock.rs`), which
+# panics on wasm32-unknown-unknown regardless of `web-time` (that only
+# covers direct calls in enkr's own code). gloo-timers' `setTimeout`-backed
+# sleep future is the wasm32 replacement for the couple of `tokio::time`
+# call sites `sync/engine.rs` has (see `sync/clock.rs`).
+gloo-timers = { version = "0.3", features = ["futures"] }
+# Reads a PNG/JPEG's `(width, height)` from its header only — no pixel decode.
+# `image_pump`'s wasm32 leg only ever needs intrinsic size for the editor's
+# aspect-ratio layout math; the DOM backend hands the original bytes straight
+# to a `<img>` and lets the browser decode them (see `IMUI::
+# provide_image_encoded`), so there's no wasm32 story needed for the full
+# `image` crate here (native-only, see above).
+imagesize = "0.13"
+
+[dev-dependencies]
+mae = { git = "https://github.com/xarkes/mae.git", features = ["testkit"] }
+enkr-syncd = { path = "../enkr-syncd" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+async-trait = "0.1"
+# Building the odd JS snippet a `CdpDriver` scenario evaluates in the page
+# (`tests/app_sync.rs`) — used for its string *quoting*, so a marker with a
+# quote or a backslash in it can never break out of the expression.
+serde_json = "1"
+# Self dev-dependency (same trick mae's own Cargo.toml uses): turns on
+# enkr's own "testkit"/"cdp" features via feature unification for `cargo
+# test`, so driver_test!'s cdp variants run by default instead of needing
+# `--features cdp` spelled out every time.
+enkr = { path = ".", features = ["testkit", "cdp"] }
+
+[features]
+png_capture = ["mae/png_capture"]
+# `enkr --showcase`: fully automated, screen-recordable collaboration demo.
+# Runs an in-process sync server, a headless second client, and drives both
+# clients through their real widgets via the testkit harness.
+testkit = ["mae/testkit", "dep:enkr-syncd", "tokio/rt-multi-thread"]
+# `mae::testkit::cdp::CdpDriver` (tests/testkit_driver.rs): drives a real
+# page in a locally installed headless Chromium — see mae/src/testkit/cdp.rs.
+cdp = ["mae/cdp"]
+
+# curve25519-dalek's unoptimized field arithmetic is ~90x slower than
+# optimized (a known upstream characteristic, not a bug) — enough that
+# enkr-proto's Ed25519 sig verification turns a 201-frame backlog replay in a
+# debug/test build into ~1.7s of pure crypto instead of ~19ms, tripping sync
+# test timing assertions (e.g. `cold_sync_10k_updates_under_a_second`).
+# Applies to `cargo test` too: the (unconfigured) test profile inherits dev.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+codegen-units = 1
+
