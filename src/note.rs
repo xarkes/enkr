@@ -2151,6 +2151,21 @@ impl TextEditBuffer for Note {
         Note::text(self)
     }
 
+    /// The editor calls this once a frame. Yrs has no append-into-a-buffer
+    /// API — `get_string` walks the document and hands back a fresh `String`
+    /// either way — so the most that can be saved here is the *second* copy
+    /// the default implementation makes on top of it. Taking the materialized
+    /// string wholesale does that.
+    ///
+    /// What is left is the materialization itself, which is O(the note) on
+    /// every frame the editor is on screen. Removing that means caching the
+    /// body on `Note` alongside `title`/`preview` and invalidating it from
+    /// every mutation path (local edits, remote applies, undo) — worth doing,
+    /// but it is CRDT state and a missed invalidation shows the wrong text.
+    fn read_text_into(&self, out: &mut String) {
+        *out = Note::text(self);
+    }
+
     fn insert_text(&mut self, index: usize, text: &str) {
         Note::insert_text(self, index, text);
     }
