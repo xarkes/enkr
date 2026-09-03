@@ -34,6 +34,25 @@ async fn two_clients_live_edit_converges() {
     assert_eq!(text, "hello world");
 }
 
+/// An accountless authenticated key is only an invited collaborator identity;
+/// it must not create durable relay state merely by connecting. Otherwise a
+/// client can exhaust the database by reconnecting with fresh keypairs.
+#[tokio::test]
+async fn accountless_connections_do_not_register_devices() {
+    let server = TestServer::start_default().await;
+    let client = server.client();
+    wait_connected(&client).await;
+
+    let devices: i64 = server
+        .raw_db()
+        .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        devices, 0,
+        "an accountless handshake grew the devices table"
+    );
+}
+
 #[tokio::test]
 async fn blob_uploads_and_downloads_across_clients() {
     let server = TestServer::start_default().await;
