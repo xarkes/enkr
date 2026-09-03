@@ -292,6 +292,93 @@ async fn a_failing_store_does_not_drop_the_connection() {
     assert!(text.contains("content;"), "did not recover: {text:?}");
 }
 
+/// Content is refused when the log the client holds says its author never had
+/// write rights — even though the frames are perfectly signed and decryptable.
+///
+/// A reader holds the space key, so it can seal and sign a valid update or
+/// snapshot; only the role says it may not, and the relay's ACL is a mirror the
+/// relay maintains itself. So peers re-derive the role from the signed log and
+/// refuse content on their own account. This drives that gate the only way an
+/// honest client can be made to: the relay suppresses a *promotion*, so a
+/// legitimate writer's frames reach a joiner whose log still shows the author
+/// as read-only.
+///
+/// The refusal has to be a park, not a drop. Neither an `Add` nor a promotion
+/// bumps the epoch, so a connected client has no signal to refetch the log and
+/// a stale one is an ordinary race — discarding on it would diverge the replica
+/// permanently over a member who is entirely legitimate.
+#[tokio::test]
+#[ignore = "resilience"]
+async fn content_from_an_author_the_log_says_cannot_write_is_refused() {
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.expect("create space");
+    let doc = owner.create_doc(space).await.expect("create doc");
+    owner.insert_text(doc, 0, "owner;").await.expect("insert");
+    owner.flush().await.expect("flush");
+
+    // Alice keeps her identity across the restart below, so she stays the same
+    // device — and therefore the same author — throughout.
+    let alice_key = std::env::temp_dir().join(format!("enkr-acl-alice-{}.key", Uuid::new_v4()));
+    let alice = server.client_with_identity(alice_key.clone());
+    wait_connected(&alice).await;
+    invite_and_join_as(&owner, &alice, space, MemberRole::Reader).await; // op 1
+
+    // The joiner learns the log while alice is still read-only.
+    let joiner = server.client();
+    wait_connected(&joiner).await;
+    invite_and_join(&owner, &joiner, space).await; // op 2
+
+    // Alice is promoted (op 3, the newest). Her own client only picks that up
+    // on a fresh join — nothing pushes a role change to a connected member.
+    owner
+        .set_member_role(space, alice.device_pk(), MemberRole::Writer)
+        .await
+        .expect("promote");
+    alice.shutdown().await;
+    let alice = server.client_with_identity(alice_key.clone());
+    wait_connected(&alice).await;
+    alice.join_space(space).await.expect("rejoin");
+    alice.open_doc(space, doc).await.expect("open doc");
+    alice.insert_text(doc, 0, "alice;").await.expect("insert");
+    alice.flush().await.expect("flush");
+    converge(&[&owner, &alice], doc).await;
+
+    // The relay now withholds the promotion, so the joiner's log — and every
+    // refetch it makes — still says alice may only read.
+    hostility.suppress_membership_ops(1);
+    let mut events = joiner.events();
+    joiner.open_doc(space, doc).await.expect("open doc");
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let text = joiner.doc_text(doc).await.expect("doc text");
+    assert!(
+        !text.contains("alice;"),
+        "applied content from an author the log shows as read-only: {text:?}"
+    );
+    let mut flagged = false;
+    while let Ok(event) = events.try_recv() {
+        if let enkr::sync::SyncEvent::SecurityWarning { context } = event
+            && context.contains("no write rights")
+        {
+            flagged = true;
+        }
+    }
+    assert!(flagged, "the refusal was silent; it must be surfaced");
+
+    // Parked, not discarded: the honest log lets the same frames through.
+    hostility.suppress_membership_ops(0);
+    alice.insert_text(doc, 0, "alice2;").await.expect("insert");
+    alice.flush().await.expect("flush");
+    let text = converge(&[&owner, &alice, &joiner], doc).await;
+    assert!(
+        text.contains("alice;") && text.contains("alice2;"),
+        "parked frames were not replayed once the log authorised them: {text:?}"
+    );
+    let _ = std::fs::remove_file(&alice_key);
+}
+
 /// A relay that hides the newest membership ops must not roll a client back.
 ///
 /// `TODO.md:82` describes the attack: an actively malicious server suppresses

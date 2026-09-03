@@ -357,7 +357,10 @@ impl Engine {
             // we are leaving, and the UI is already gone.
             while let Some(Ok(_)) = stream.next().await {}
         };
-        if super::clock::timeout(CLOSE_TIMEOUT, handshake).await.is_err() {
+        if super::clock::timeout(CLOSE_TIMEOUT, handshake)
+            .await
+            .is_err()
+        {
             log::debug!("sync: server did not complete the close handshake in time");
         }
     }
@@ -1502,13 +1505,16 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        if !own && !space.membership.was_ever_member(&frame.author_device) {
-            // Not necessarily hostile, and usually not: adding a member never
-            // bumps the epoch, so an already-connected member has no reason to
-            // have refetched the log since this device joined. Defer the frame
-            // and refresh the log rather than dropping an honest edit — that
-            // silently diverges the replica forever.
-            log::debug!("doc {doc_id}: frame from device missing from the membership log");
+        if !own && !space.membership.could_ever_write(&frame.author_device) {
+            // Not necessarily hostile, and usually not: neither adding a member
+            // nor promoting one bumps the epoch, so an already-connected member
+            // has no reason to have refetched the log since either happened —
+            // an honest writer can genuinely look unknown, or look read-only.
+            // Defer the frame and refresh the log rather than dropping an
+            // honest edit, which silently diverges the replica forever. A
+            // reader's forgery parks here too and is simply never retried into
+            // acceptance; the buffer is bounded either way.
+            log::debug!("doc {doc_id}: frame from a device the log does not authorise");
             self.note_seq(doc_id, seq); // frontier advances; the frame is kept
             self.defer_frame(doc_id, frame);
             self.deferred_membership_request(space_id);
@@ -1754,6 +1760,13 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
+        // Same gate as `flush_doc`: a snapshot is content, so a device without
+        // write rights must not author one even when asked. The relay refuses
+        // it too, but a reader that shipped one would just be told off on every
+        // compaction round.
+        if !space.membership.can_write(&self.identity.device_pk()) {
+            return;
+        }
         let Some((epoch, key)) = space.latest_key() else {
             return;
         };
@@ -1787,8 +1800,20 @@ impl Engine {
             return;
         };
         let own = frame.author_device == self.identity.device_pk();
-        if !own && !space.membership.was_ever_member(&frame.author_device) {
-            self.warn_security(format!("doc {doc_id}: snapshot from unknown device"));
+        // A snapshot replaces the whole document, so the author must be one the
+        // log says could write it. Membership alone is not enough: a reader can
+        // seal and sign a valid snapshot with the space key it legitimately
+        // holds, and accepting that hands every reader an edit channel wider
+        // than the one `flush_doc` denies them.
+        if !own && !space.membership.could_ever_write(&frame.author_device) {
+            self.warn_security(format!(
+                "doc {doc_id}: snapshot from a device with no write rights"
+            ));
+            // Same race as `apply_frame`: a promotion bumps no epoch, so this
+            // may just be a stale log. Snapshots have no deferral queue — the
+            // relay re-offers the current one on every subscribe — so refresh
+            // and let the next subscribe deliver it.
+            self.request_membership(space_id).await;
             return;
         }
         let Some(key) = space.keys.get(&frame.epoch) else {
@@ -1877,11 +1902,14 @@ impl Engine {
             return;
         };
         let own = frame.author_device == self.identity.device_pk();
-        if !own && !space.membership.was_ever_member(&frame.author_device) {
-            // The refreshed log still doesn't know this device. Keep the frame
-            // (a later Add may yet explain it) but say so — after a refetch
-            // this is what a forged frame looks like.
-            self.warn_security(format!("doc {doc_id}: frame from unknown device"));
+        if !own && !space.membership.could_ever_write(&frame.author_device) {
+            // The refreshed log still doesn't grant this device write rights —
+            // it is unknown, or it is a reader. Keep the frame (a later Add or
+            // promotion may yet explain it) but say so: after a refetch, this
+            // is what a forged frame looks like.
+            self.warn_security(format!(
+                "doc {doc_id}: frame from a device with no write rights"
+            ));
             self.defer_frame(doc_id, frame);
             return;
         }

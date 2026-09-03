@@ -187,6 +187,12 @@ cdp = ["mae/cdp"]
 opt-level = 3
 codegen-units = 1
 
+# Built against the sibling checkout rather than the pinned revision above, for
+# the same reason as mae below: enkr-proto and this app are developed together,
+# and a protocol change is only really tested by this suite running against it.
+[patch."https://github.com/xarkes/enkr-proto.git"]
+enkr-proto = { path = "../enkr-proto" }
+
 # Built against the sibling checkout rather than the pinned revision above:
 # mae and this app are developed together, and a fix in one is only really
 # tested by the other's suite running against it.

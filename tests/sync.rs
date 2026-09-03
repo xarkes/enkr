@@ -1034,6 +1034,122 @@ async fn edits_still_propagate_after_the_gc_drains_a_compacted_doc() {
     assert_eq!(converge(&[&a, &b, &c], doc).await, after);
 }
 
+/// A reader must not be able to rewrite a doc by *snapshotting* it.
+///
+/// `reader_members_can_read_but_not_write` covers the push path. The snapshot
+/// path is the wider hole: a snapshot is a full-state replace, and a reader
+/// holds the space key — that is what lets it read — so it can seal and sign
+/// one that is cryptographically perfect. Only the role says it may not, and
+/// the role was checked on `PushUpdate` but not on `PutSnapshot`.
+#[tokio::test]
+async fn readers_cannot_rewrite_a_doc_through_a_snapshot() {
+    let mut config = ServerConfig::default();
+    config.snapshot_request_threshold = 2;
+    let server = TestServer::start(config).await;
+
+    let owner = server.client();
+    // A reader that volunteers a snapshot at every opportunity.
+    let mut cfg = enkr::sync::SyncConfig::new(server.url(), enkr::sync::IdentityStore::InMemory);
+    cfg.debounce = Duration::from_millis(20);
+    cfg.heartbeat = Duration::from_millis(300);
+    cfg.liveness_timeout = Duration::from_secs(2);
+    cfg.reconnect_max = Duration::from_secs(1);
+    cfg.snapshot_threshold = 1;
+    let reader = TestClient::spawn(cfg);
+    wait_connected(&owner).await;
+    wait_connected(&reader).await;
+
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "trusted;").await.unwrap();
+    owner.flush().await.unwrap();
+    invite_and_join_as(&owner, &reader, space, MemberRole::Reader).await;
+    reader.open_doc(space, doc).await.unwrap();
+    assert_eq!(converge(&[&owner, &reader], doc).await, "trusted;");
+
+    // The reader's push is refused, but the text is in its local replica — so
+    // any snapshot it authors carries it.
+    reader.insert_text(doc, 0, "reader-write;").await.unwrap();
+    reader.flush().await.unwrap();
+    owner.insert_text(doc, 0, "more;").await.unwrap();
+    owner.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let reader_pk = reader.device_pk().to_vec();
+    let authored: i64 = server
+        .raw_db()
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE author_device = ?1",
+            [&reader_pk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(authored, 0, "the relay stored a reader-authored snapshot");
+
+    // A member arriving afterwards rebuilds the doc from what the relay has.
+    let joiner = server.client();
+    wait_connected(&joiner).await;
+    invite_and_join(&owner, &joiner, space).await;
+    joiner.open_doc(space, doc).await.unwrap();
+    let text = converge(&[&owner, &joiner], doc).await;
+    assert!(
+        !text.contains("reader-write;"),
+        "reader-authored content reached another member: {text:?}"
+    );
+}
+
+/// The flip side of the gate above: it keys on whether a device could *ever*
+/// write, not on its role right now.
+///
+/// A frame is not bound to the membership state it was written under, so gating
+/// on the live role would make a demotion retroactively invalidate honest
+/// history — the snapshot a writer authored before being demoted is the whole
+/// doc, and dropping it strands every member who has not already applied it.
+#[tokio::test]
+async fn a_demoted_writers_existing_snapshot_is_still_accepted() {
+    let mut config = ServerConfig::default();
+    config.snapshot_request_threshold = 2;
+    let server = TestServer::start(config).await;
+
+    let (owner, member, space, doc) = space_with_two_clients(&server).await;
+    // The member (a writer) authors the doc *and* its snapshot.
+    for i in 0..4 {
+        member.insert_text(doc, 0, format!("w{i};")).await.unwrap();
+        member.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    let text = converge(&[&owner, &member], doc).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let member_pk = member.device_pk().to_vec();
+    let authored: i64 = server
+        .raw_db()
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE author_device = ?1",
+            [&member_pk],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        authored >= 1,
+        "precondition: the writer authored a snapshot"
+    );
+
+    // Now demote it. The snapshot it already wrote must stay readable.
+    owner
+        .set_member_role(space, member.device_pk(), MemberRole::Reader)
+        .await
+        .unwrap();
+    let joiner = server.client();
+    wait_connected(&joiner).await;
+    invite_and_join(&owner, &joiner, space).await;
+    joiner.open_doc(space, doc).await.unwrap();
+    assert_eq!(
+        converge(&[&owner, &joiner], doc).await,
+        text,
+        "a demoted writer's snapshot was rejected, stranding a new member"
+    );
+}
+
 #[tokio::test]
 async fn storage_stays_bounded_under_continuous_editing() {
     let mut config = ServerConfig::default();
