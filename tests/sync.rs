@@ -976,6 +976,64 @@ async fn single_client_compaction_via_request_snapshot_and_gc() {
     }
 }
 
+/// Editing must keep working after the GC has emptied a compacted doc's log.
+///
+/// The sweep is what makes this interesting: once a snapshot covers head and
+/// gets acked, `gc_updates_through` deletes every update row the doc has. A
+/// `seq` counter derived from that table then restarts at 1 and re-issues seqs
+/// the subscribers have already retired — which they drop as duplicates
+/// (`seq <= have_seq`), diverging both replicas with no error on either side
+/// and no way back, since `updates_since(covers_seq)` never returns them
+/// either. The other compaction tests above only assert the log *shrank*, and
+/// a partial sweep leaves a tail that hides this entirely.
+#[tokio::test]
+async fn edits_still_propagate_after_the_gc_drains_a_compacted_doc() {
+    let mut config = ServerConfig::default();
+    config.snapshot_request_threshold = 2;
+    config.snapshot_retention = Duration::from_millis(0); // self-ack instantly
+    config.gc_interval = Duration::from_millis(100);
+    let server = TestServer::start(config).await;
+
+    let (a, b, space, doc) = space_with_two_clients(&server).await;
+    for i in 0..4 {
+        a.insert_text(doc, 0, format!("pre{i};")).await.unwrap();
+        a.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    let before = converge(&[&a, &b], doc).await;
+
+    // Wait for a sweep that covers head, so the log really is empty — that is
+    // the state a quiet doc settles into, not an edge case.
+    let deadline = tokio::time::Instant::now() + CONVERGE_TIMEOUT;
+    loop {
+        let updates: i64 = server
+            .raw_db()
+            .query_row("SELECT COUNT(*) FROM updates", [], |r| r.get(0))
+            .unwrap();
+        if updates == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "log never fully compacted: {updates} update rows left"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    a.insert_text(doc, 0, "post-gc;").await.unwrap();
+    a.flush().await.unwrap();
+    let after = converge(&[&a, &b], doc).await;
+    assert_eq!(after, format!("post-gc;{before}"));
+
+    // And a member arriving after the sweep rebuilds the whole doc from
+    // snapshot + post-sweep tail.
+    let c = server.client();
+    wait_connected(&c).await;
+    invite_and_join(&a, &c, space).await;
+    c.open_doc(space, doc).await.unwrap();
+    assert_eq!(converge(&[&a, &b, &c], doc).await, after);
+}
+
 #[tokio::test]
 async fn storage_stays_bounded_under_continuous_editing() {
     let mut config = ServerConfig::default();
