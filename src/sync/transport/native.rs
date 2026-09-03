@@ -68,6 +68,7 @@ impl Sink<Vec<u8>> for Ws {
 /// tungstenite would refuse to send a `PutBlob` near `MAX_BLOB_BYTES` before
 /// it ever reaches the wire.
 pub(crate) async fn connect(url: &str) -> Result<Ws, WsError> {
+    super::validate_server_url(url)?;
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(wire::MAX_MESSAGE_BYTES))
         .max_frame_size(Some(wire::MAX_MESSAGE_BYTES));

@@ -66,6 +66,7 @@ impl Sink<Vec<u8>> for Ws {
 /// limits, and `wire::MAX_MESSAGE_BYTES` is already enforced at the protocol
 /// level regardless of transport.
 pub(crate) async fn connect(url: &str) -> Result<Ws, WsError> {
+    super::validate_server_url(url)?;
     let socket = WebSocket::new(url).map_err(|e| format!("{e:?}"))?;
     socket.set_binary_type(BinaryType::Arraybuffer);
 

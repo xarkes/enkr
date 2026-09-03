@@ -718,6 +718,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "unicode-normalization",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",

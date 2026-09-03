@@ -26,6 +26,7 @@ web-time = "1"
 # `rand` crate via `rng-rand`. A no-op addition on native, which resolves
 # uuid's randomness some other way regardless.
 uuid = { version = "1", features = ["v4", "serde", "rng-getrandom"] }
+url = "2"
 serde = { version = "1", features = ["derive"] }
 # "sink": Sink/SinkExt/SplitSink/SplitStream (sync/engine.rs, sync/transport/
 # *.rs) — previously reached transitively via some other dependency (present
