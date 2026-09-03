@@ -1004,6 +1004,43 @@ fn font_px(driver: &mut mae::testkit::cdp::CdpDriver, expr: &str) -> f64 {
         .unwrap_or_else(|| panic!("no font size from {expr:?}: {value:?}"))
 }
 
+/// The note title is as wide as its title, at the size the browser draws it.
+///
+/// It asks to hug its text (`UISize::TextContent`), and on this backend that
+/// was mae's *own* measurement of the text written out as a pixel width. mae
+/// shapes with harfrust and the browser with its own engine, so the two were
+/// always a pixel or two apart — and on a touch device they part company
+/// completely, because the field is rendered at the 16px floor that keeps iOS
+/// from zooming the page while mae measured the 14px the app asked for. The
+/// title lost its last characters. `field-sizing: content` hands the job to
+/// the only party that knows what it is about to draw.
+#[cfg(feature = "cdp")]
+#[test]
+fn the_note_title_fits_the_text_the_browser_draws() {
+    // `scrollWidth` past `clientWidth` is the browser saying "this does not
+    // fit in the box you gave me".
+    const OVERFLOW: &str = "(() => { \
+       const el = document.querySelector('[data-mae-key=\"###enkr_note_title\"]'); \
+       return el ? el.scrollWidth - el.clientWidth : -1; \
+     })()";
+    let mut driver = crate::testkit_support::launch_test_harness();
+
+    let desktop = driver.debug_eval(OVERFLOW).as_f64().expect("note title");
+    assert!(
+        (0.0..=1.0).contains(&desktop),
+        "the title should fit its own text on a desktop pointer, overflowing by {desktop}px"
+    );
+
+    // Where it really mattered: the touch font floor makes the text wider
+    // than anything mae measured.
+    driver.emulate_mobile_device(390.0, 844.0);
+    let phone = driver.debug_eval(OVERFLOW).as_f64().expect("note title");
+    assert!(
+        (0.0..=1.0).contains(&phone),
+        "the title should fit the 16px text a touch device draws, overflowing by {phone}px"
+    );
+}
+
 /// A chromeless editor has no border on the web either.
 ///
 /// The note editor asks for none (`TextAreaOptions::border(false)`, which
@@ -1026,6 +1063,106 @@ fn the_web_editor_has_no_border_around_it() {
         driver.debug_eval(editor_border).as_str(),
         Some("0px 0px 0px 0px"),
         "the note editor should have no border on the DOM backend"
+    );
+}
+
+/// Opening a popover costs a couple of frames, not a couple of dozen.
+///
+/// mae eases hover tints, focus rings, a pane appearing and scroll offsets by
+/// interpolating them a step per frame and asking for another frame while
+/// anything is still moving (`animate_visual_state`, `animate_scroll_offsets`).
+/// On a GPU backend that *is* the animation. On the DOM backend it meant the
+/// whole app was rebuilt and re-diffed at 60fps for the duration of every
+/// fade — the browser can do that easing itself, off the main thread, for
+/// nothing. Rust now writes the target value straight out and CSS eases it.
+///
+/// Counted rather than eyeballed: the app's own `requestAnimationFrame` calls
+/// over one palette-opening click. The driver's `settle` uses the *unwrapped*
+/// rAF, so its polling never inflates this.
+#[cfg(feature = "cdp")]
+#[test]
+fn opening_a_popover_does_not_rebuild_for_the_length_of_its_fade() {
+    let mut driver = crate::testkit_support::launch_test_harness();
+    driver.debug_eval(
+        "(() => { \
+           window.__maeFrames = 0; \
+           const prev = window.requestAnimationFrame; \
+           window.requestAnimationFrame = (cb) => { window.__maeFrames++; return prev(cb); }; \
+           return 0; \
+         })()",
+    );
+
+    // One click, which opens the space palette — a floating pane with a
+    // background and a border, i.e. everything that used to animate.
+    driver.click("###enkr_space_switcher");
+    assert!(
+        driver.exists("###enkr_search_input"),
+        "the palette should have opened"
+    );
+
+    let frames = driver
+        .debug_eval("window.__maeFrames")
+        .as_f64()
+        .expect("frame counter should be readable");
+    // 4 as this is written, against 17 with the easing still in Rust.
+    assert!(
+        frames <= 8.0,
+        "opening a popover should cost a few frames, not one per frame of its fade — got {frames}"
+    );
+}
+
+/// The app re-lays-out when the browser does, with mae's own loop frozen.
+///
+/// This is what a viewport change costs. mae solves the whole layout itself
+/// and used to pin every box to the pixels that came out — so a browser-side
+/// reflow (an on-screen keyboard, a rotation, a window resize, a font
+/// finishing loading) showed last frame's layout until mae woke up, solved
+/// again and rewrote every element. On a phone that is the visible lag when
+/// the keyboard closes. A box that declared `Fill` or a percentage now says
+/// so in CSS (`paint_dom.rs`'s `CssLen`), so the browser reflows it on the
+/// spot — starting with the root, which fills its container instead of
+/// restating the pixels mae measured out of it.
+///
+/// `requestAnimationFrame` is stubbed out first, so nothing mae does can be
+/// what produced the new layout: every rebuild the app might schedule from
+/// here on is dropped on the floor, and what is measured afterwards is the
+/// browser's own work on what was already on the page. The sidebar is a fixed
+/// width, so the content column beside it is what has to absorb the whole
+/// change.
+#[cfg(feature = "cdp")]
+#[test]
+fn the_layout_follows_the_viewport_without_a_rebuild() {
+    const SHRINK_BY: f64 = 300.0;
+    let mut driver = crate::testkit_support::launch_test_harness();
+    const CONTENT_WIDTH: &str = "document.querySelector('[data-mae-key=\"###enkr_content_column\"]')\
+                                 .getBoundingClientRect().width";
+
+    let width = driver
+        .debug_eval("window.innerWidth")
+        .as_f64()
+        .expect("window width");
+    let height = driver
+        .debug_eval("window.innerHeight")
+        .as_f64()
+        .expect("window height");
+    let before = driver
+        .debug_eval(CONTENT_WIDTH)
+        .as_f64()
+        .expect("content column");
+    assert!(before > SHRINK_BY, "the column has to have room to lose");
+
+    // From here on the app cannot draw at all.
+    driver.debug_eval("window.requestAnimationFrame = () => 0; 0");
+    driver.set_viewport((width - SHRINK_BY) as f32, height as f32);
+
+    let after = driver
+        .debug_eval(CONTENT_WIDTH)
+        .as_f64()
+        .expect("content column");
+    assert!(
+        (before - after - SHRINK_BY).abs() <= 2.0,
+        "the content column should have absorbed the whole {SHRINK_BY}px on its own, \
+         with no frame drawn: {before} -> {after}"
     );
 }
 
@@ -1069,17 +1206,23 @@ fn the_web_page_lays_out_at_device_width() {
     );
 }
 
-/// A one-finger drag scrolls a list.
+/// A one-finger drag scrolls a list, and the list is a real scroller.
 ///
-/// mae scrolls by transforming a wrapper inside a clipped box rather than
-/// giving the browser a real scroller to drive (`ensure_scroll_wrapper`), and
-/// scroll input was wheel-only — so before this nothing mae drew could be
-/// scrolled on a touch device at all. The drag is turned into the same
-/// `OSEvent::scroll` stream the wheel produces (`os/wasm.rs`'s `TouchPan`).
+/// mae used to scroll by transforming a wrapper inside a clipped box, with
+/// nothing native under it: no scrollbar the browser drew, no momentum, no
+/// rubber-banding, and — until `TouchPan` re-synthesised a drag into the
+/// wheel's own `OSEvent::scroll` — no way to scroll by finger at all. The box
+/// is `overflow: auto` now, so the browser does all of it and mae only
+/// mirrors the offset it lands on (`paint_dom.rs`'s `attach_scroll_listener`).
 ///
-/// The exact-match assertion is the point: content tracks the finger 1:1, so
-/// an 80px drag moves the list by exactly 80px. Anything else would be a
-/// scroll that fights the hand doing it.
+/// Both halves are asserted: that it is a real scroller (an offset the
+/// browser reports on the element itself, not a transform mae wrote), and
+/// that the content tracks the finger. Not to the pixel any more, and that
+/// is the point: the browser holds a gesture for its own touch slop before
+/// deciding it is a pan (~15px in Chromium), so an 80px drag moves the list
+/// by 80 *minus* that. mae's re-synthesised version had its own 8px slop and
+/// then tracked exactly; a real scroller feels like every other scroller on
+/// the device instead, which is what was wanted.
 #[cfg(feature = "cdp")]
 #[test]
 fn a_touch_drag_scrolls_a_list() {
@@ -1089,25 +1232,87 @@ fn a_touch_drag_scrolls_a_list() {
     driver.emulate_mobile_device(390.0, 420.0);
     driver.click("###enkr_drawer_toggle");
 
-    // The scroll wrapper is the child carrying a transform — it is a sibling
-    // of the scrollbar thumb, so it is not reliably the first one.
-    const WRAPPER_TRANSFORM: &str = "(() => { \
+    const LIST: &str = "(() => { \
            const list = document.querySelector('[data-mae-key=\"###enkr_notes_list\"]'); \
            if (!list) return 'no list'; \
-           const wrapper = [...list.children].find(c => c.style.transform); \
-           return wrapper ? wrapper.style.transform : 'no wrapper'; \
+           return JSON.stringify({top: list.scrollTop, \
+             room: list.scrollHeight - list.clientHeight, \
+             overflow: getComputedStyle(list).overflowY, \
+             transform: [...list.children].some(c => c.style.transform)}); \
          })()";
+    let read = |driver: &mut mae::testkit::cdp::CdpDriver| -> serde_json::Value {
+        let raw = driver.debug_eval(LIST);
+        serde_json::from_str(raw.as_str().expect("list on screen")).expect("list state")
+    };
 
+    let before = read(&mut driver);
     assert_eq!(
-        driver.debug_eval(WRAPPER_TRANSFORM).as_str(),
-        Some("translate(0px, 0px)"),
-        "the list should start unscrolled"
+        before["overflow"], "auto",
+        "the list should be a real scroller"
     );
+    assert_eq!(before["transform"], false, "and not a transformed wrapper");
+    assert_eq!(before["top"], 0.0, "starting unscrolled");
+    assert!(
+        before["room"].as_f64().unwrap_or(0.0) >= 80.0,
+        "the list needs somewhere to scroll to, or this passes vacuously: {before}"
+    );
+
     driver.touch_drag("###enkr_notes_list", 0.0, -80.0);
-    assert_eq!(
-        driver.debug_eval(WRAPPER_TRANSFORM).as_str(),
-        Some("translate(0px, -80px)"),
-        "the list should follow the finger exactly"
+    let top = read(&mut driver)["top"].as_f64().unwrap_or(-1.0);
+    assert!(
+        (60.0..=80.0).contains(&top),
+        "an 80px drag should scroll the list by 80px less the browser's own \
+         touch slop, got {top}px"
+    );
+}
+
+/// Arrowing down a long list scrolls it — the app moving a real scroller,
+/// not mae moving something of its own.
+///
+/// The other half of handing scrolling to the browser. A wheel or a finger is
+/// the browser's business end to end now, but the app still has one thing to
+/// say about the offset — "keep the row I just selected on screen"
+/// (`scroll_to_y`) — and that has to reach the element. mae keeps `scroll` as
+/// a mirror of the browser's `scrollTop` and `scroll_target` as what it
+/// wants, so the gap between them is exactly the programmatic move to push,
+/// and a scroll the *user* performed closes that gap by arriving as both.
+#[cfg(feature = "cdp")]
+#[test]
+fn keyboard_selection_scrolls_the_list_it_is_in() {
+    const RESULTS: &str = "(() => { \
+       const el = document.querySelector('[data-mae-key=\"###enkr_search_results\"]'); \
+       if (!el) return null; \
+       return JSON.stringify({top: el.scrollTop, room: el.scrollHeight - el.clientHeight}); \
+     })()";
+    let mut driver = crate::testkit_support::launch_test_harness();
+    // A short window, so the four demo spaces are more rows than fit. The
+    // space switcher rather than a search: it builds its rows synchronously,
+    // where search streams them in from a worker the web build has none of.
+    driver.emulate_mobile_device(390.0, 300.0);
+    driver.key_press_with_flags(OSKeyCode::KeyK, OSEventFlag::command());
+    assert!(
+        driver.exists("###enkr_search_input"),
+        "Cmd+K should open the space switcher"
+    );
+
+    let read = |driver: &mut mae::testkit::cdp::CdpDriver| -> serde_json::Value {
+        let raw = driver.debug_eval(RESULTS);
+        serde_json::from_str(raw.as_str().expect("row list on screen")).expect("list state")
+    };
+    let before = read(&mut driver);
+    assert!(
+        before["room"].as_f64().unwrap_or(0.0) >= 20.0,
+        "the list needs to overflow, or this passes vacuously: {before}"
+    );
+    assert_eq!(before["top"], 0.0, "starting at the top");
+
+    for _ in 0..3 {
+        driver.key_press(OSKeyCode::KeyDownArrow);
+    }
+    let after = read(&mut driver);
+    assert!(
+        after["top"].as_f64().unwrap_or(0.0) > 0.0,
+        "arrowing past the visible rows should have scrolled the list: {after}"
     );
 }
 
