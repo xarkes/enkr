@@ -61,7 +61,7 @@ const MAX_DEFERRED_FRAMES: usize = 1024;
 /// as the frame-size guard. Chunking also keeps the server's per-message
 /// subscribe loop short enough that other traffic on the connection interleaves
 /// instead of queueing behind one huge batch.
-const SUBSCRIBE_BATCH: usize = 512;
+const SUBSCRIBE_BATCH: usize = wire::MAX_SUBSCRIBE_ENTRIES;
 
 /// How long the shutdown path waits for the WebSocket closing handshake (our
 /// Close frame out, the relay's Close back). Short on purpose: this runs while
