@@ -1098,6 +1098,51 @@ async fn readers_cannot_rewrite_a_doc_through_a_snapshot() {
     );
 }
 
+/// The relay's outer SnapshotInfo.covers_seq is not authenticated. A forged
+/// high value must not make the client retire future update sequence numbers.
+#[tokio::test]
+async fn forged_snapshot_metadata_cannot_wedge_a_doc() {
+    let mut config = ServerConfig::default();
+    config.snapshot_request_threshold = 1;
+    config.snapshot_retention = Duration::from_secs(60);
+    let (server, hostility) = TestServer::start_hostile(config).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "before;").await.unwrap();
+    owner.flush().await.unwrap();
+    let snapshot_deadline = tokio::time::Instant::now() + CONVERGE_TIMEOUT;
+    loop {
+        let count: i64 = server
+            .raw_db()
+            .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))
+            .unwrap();
+        if count > 0 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < snapshot_deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let joiner = server.client();
+    wait_connected(&joiner).await;
+    invite_and_join(&owner, &joiner, space).await;
+    hostility.lie_snapshot_covers_seq(1 << 63);
+    joiner.open_doc(space, doc).await.unwrap();
+
+    // The signed snapshot still covers only the real pre-edit sequence. The
+    // next live update must therefore not be mistaken for an already-seen seq.
+    owner.insert_text(doc, 0, "after;").await.unwrap();
+    owner.flush().await.unwrap();
+    let text = converge(&[&owner, &joiner], doc).await;
+    assert!(
+        text.contains("after;"),
+        "forged metadata wedged the document: {text:?}"
+    );
+}
+
 /// The flip side of the gate above: it keys on whether a device could *ever*
 /// write, not on its role right now.
 ///

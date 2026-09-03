@@ -29,6 +29,9 @@ pub struct Hostility {
     /// withheld. This is the rollback attack `TODO.md:82` describes: a relay
     /// that hides the newest `Remove` keeps a revoked member looking current.
     pub suppress_membership_ops: AtomicU64,
+    /// Replace only the unsigned snapshot metadata value returned by the store.
+    /// The encoded `SnapshotFrame` remains untouched, simulating a lying relay.
+    pub lie_snapshot_covers_seq: AtomicU64,
 }
 
 impl Hostility {
@@ -38,6 +41,10 @@ impl Hostility {
 
     pub fn suppress_membership_ops(&self, n: u64) {
         self.suppress_membership_ops.store(n, Ordering::Relaxed);
+    }
+
+    pub fn lie_snapshot_covers_seq(&self, n: u64) {
+        self.lie_snapshot_covers_seq.store(n, Ordering::Relaxed);
     }
 }
 
@@ -236,7 +243,17 @@ impl Store for HostileStore {
     }
 
     async fn latest_snapshot(&self, doc_id: &Uuid) -> Result<Option<SnapshotRow>> {
-        self.inner.latest_snapshot(doc_id).await
+        let snapshot = self.inner.latest_snapshot(doc_id).await?;
+        let lie = self
+            .hostility
+            .lie_snapshot_covers_seq
+            .load(Ordering::Relaxed);
+        Ok(snapshot.map(|mut snapshot| {
+            if lie != 0 {
+                snapshot.covers_seq = lie;
+            }
+            snapshot
+        }))
     }
 
     async fn ack_snapshot(&self, doc_id: &Uuid, covers_seq: u64) -> Result<()> {

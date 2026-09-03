@@ -1791,8 +1791,11 @@ impl Engine {
         let Some(doc) = self.docs.get_mut(&doc_id) else {
             return;
         };
-        doc.snapshot_covers = doc.snapshot_covers.max(covers_seq);
         let Some(frame) = snapshot else {
+            // No blob means the client already has at least this range. The
+            // outer value is still unauthenticated, so never let it exceed the
+            // client's existing frontier and poison compaction bookkeeping.
+            doc.snapshot_covers = doc.snapshot_covers.max(covers_seq.min(doc.have_seq));
             return;
         };
         let space_id = doc.space_id;
@@ -1827,7 +1830,11 @@ impl Engine {
         match crypto::open_snapshot(&frame, key, &space_id, &doc_id) {
             Ok(plaintext) => {
                 let doc = self.docs.get_mut(&doc_id).unwrap();
-                // The snapshot subsumes everything ≤ covers_seq.
+                // The outer SnapshotInfo.covers_seq is relay-controlled metadata.
+                // Only the authenticated frame value can advance the frontier.
+                let covers_seq = frame.covers_seq;
+                doc.snapshot_covers = doc.snapshot_covers.max(covers_seq);
+                // The snapshot subsumes everything ≤ its signed covers_seq.
                 if covers_seq > doc.have_seq {
                     doc.have_seq = covers_seq;
                     doc.ahead.retain(|s| *s > covers_seq);
