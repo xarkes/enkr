@@ -36,6 +36,12 @@ jobs:
         with:
           path: enkr
 
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libx11-dev libgl1-mesa-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
