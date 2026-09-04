@@ -1,0 +1,107 @@
+name: Release artifacts
+
+on:
+  push:
+    tags:
+      - "v*-rc*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            artifact: enkr-darwin-arm64
+            binary: enkr
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: enkr-linux-x64
+            binary: enkr
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: enkr-windows-x64.exe
+            binary: enkr.exe
+
+    steps:
+      # Cargo.toml uses local patches for the protocol and UI crates. Keep
+      # those checkouts beside enkr so the release build uses the same sources
+      # as local development without involving the private syncd repository.
+      - name: Checkout enkr
+        uses: actions/checkout@v4
+        with:
+          path: enkr
+
+      - name: Checkout enkr-proto
+        uses: actions/checkout@v4
+        with:
+          repository: xarkes/enkr-proto
+          path: enkr-proto
+
+      - name: Checkout mae
+        uses: actions/checkout@v4
+        with:
+          repository: xarkes/mae
+          path: mae
+
+      - name: Satisfy private optional dependency
+        shell: bash
+        run: |
+          mkdir -p enkr-syncd
+          printf '%s\n' \
+            '[package]' \
+            'name = "enkr-syncd"' \
+            'version = "0.0.1"' \
+            'edition = "2024"' \
+            > enkr-syncd/Cargo.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: enkr
+
+      - name: Build
+        working-directory: enkr
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Prepare raw binary
+        shell: bash
+        run: cp "enkr/target/${{ matrix.target }}/release/${{ matrix.binary }}" "${{ matrix.artifact }}"
+
+      - name: Upload raw binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: enkr-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish prerelease assets
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: release-assets/*
