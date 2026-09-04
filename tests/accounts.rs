@@ -227,6 +227,30 @@ async fn quota_refuses_writes_then_deleting_restores_them() {
         .expect("a write after freeing space was still refused");
 }
 
+/// Quota admission must include the serialized BlobFrame envelope. A quota
+/// smaller than one encoded tiny blob is still larger than its ciphertext;
+/// checking ciphertext alone would incorrectly store it and overrun quota.
+#[tokio::test]
+#[ignore = "accounts"]
+async fn quota_counts_encoded_blob_bytes() {
+    let server = TestServer::start_requiring_accounts().await;
+    let (id, token) = server.create_account("encoded", 40, None).await;
+    let client = server.client_with_token(&token);
+    wait_connected(&client).await;
+
+    let space = client.create_space().await.expect("create space");
+    let result = client.put_blob(space, Uuid::new_v4(), vec![7]).await;
+    assert!(
+        result.is_err(),
+        "ciphertext-only quota check accepted a blob"
+    );
+    assert_eq!(
+        server.used_bytes(id),
+        0,
+        "a rejected blob must not consume storage"
+    );
+}
+
 /// A lapsed subscription is read-only, not a lockout: the customer can still
 /// open their notes, export them, and delete things — they just cannot grow.
 #[tokio::test]
