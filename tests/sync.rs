@@ -34,6 +34,27 @@ async fn two_clients_live_edit_converges() {
     assert_eq!(text, "hello world");
 }
 
+/// A blob id is a global storage key. Reusing it for different sealed content
+/// must fail instead of acknowledging the second upload while retaining the
+/// first bytes.
+#[tokio::test]
+async fn blob_id_collision_is_rejected_end_to_end() {
+    let server = TestServer::start_default().await;
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let blob = Uuid::new_v4();
+
+    owner
+        .put_blob(space, blob, b"first-content".to_vec())
+        .await
+        .unwrap();
+    let second = owner
+        .put_blob(space, blob, b"different-content".to_vec())
+        .await;
+    assert!(second.is_err(), "colliding blob id was acknowledged");
+}
+
 /// A corrupt backlog frame must not retire its sequence number. Once the
 /// relay serves the intact frame on resync, the client must still apply it.
 #[tokio::test]

@@ -148,6 +148,10 @@ struct OutboxItem {
     frame: UpdateFrame,
 }
 
+fn ack_belongs_to(item: Option<&OutboxItem>, doc_id: Uuid) -> bool {
+    item.is_some_and(|item| item.doc_id == doc_id)
+}
+
 struct SpaceState {
     keys: BTreeMap<u32, SpaceKey>,
     current_epoch: u32,
@@ -238,7 +242,7 @@ pub(super) struct Engine {
     /// id; any SpaceList resolves all of them — PoC).
     pending_space_lists: Vec<oneshot::Sender<Result<Vec<Uuid>, SyncError>>>,
     /// Blob uploads awaiting `BlobStored`, keyed by blob_id (the correlation id).
-    pending_blob_puts: HashMap<Uuid, oneshot::Sender<Result<(), SyncError>>>,
+    pending_blob_puts: HashMap<Uuid, (Uuid, oneshot::Sender<Result<(), SyncError>>)>,
     /// Blob fetches awaiting `BlobData`, keyed by blob_id. Multiple callers may
     /// await the same id; each carries the space to decrypt under.
     #[allow(clippy::type_complexity)]
@@ -390,7 +394,7 @@ impl Engine {
         for waiter in self.pending_space_lists.drain(..) {
             let _ = waiter.send(Err(SyncError::Disconnected));
         }
-        for (_, reply) in self.pending_blob_puts.drain() {
+        for (_, (_, reply)) in self.pending_blob_puts.drain() {
             let _ = reply.send(Err(SyncError::Disconnected));
         }
         for (_, waiters) in self.pending_blob_gets.drain() {
@@ -1272,6 +1276,14 @@ impl Engine {
                 seq,
                 client_tag,
             } => {
+                let Some(item) = self.outbox.get(&client_tag) else {
+                    log::warn!("ignoring Ack for unknown client tag {client_tag}");
+                    return;
+                };
+                if !ack_belongs_to(Some(item), doc_id) {
+                    log::warn!("ignoring Ack with mismatched doc for client tag {client_tag}");
+                    return;
+                }
                 self.outbox.remove(&client_tag);
                 self.note_seq(doc_id, seq);
                 self.check_idle(doc_id);
@@ -1357,7 +1369,7 @@ impl Engine {
                 }
             }
             ServerMsg::BlobStored { blob_id } => {
-                if let Some(reply) = self.pending_blob_puts.remove(&blob_id) {
+                if let Some((_, reply)) = self.pending_blob_puts.remove(&blob_id) {
                     let _ = reply.send(Ok(()));
                 }
             }
@@ -1387,9 +1399,17 @@ impl Engine {
                 // (which would re-drive the poison upload on reconnect).
                 if code == wire::ErrorCode::BlobTooLarge
                     && let Ok(blob_id) = Uuid::parse_str(&context)
-                    && let Some(reply) = self.pending_blob_puts.remove(&blob_id)
+                    && let Some((_, reply)) = self.pending_blob_puts.remove(&blob_id)
                 {
                     let _ = reply.send(Err(SyncError::BlobTooLarge));
+                    return;
+                }
+                if code == wire::ErrorCode::Conflict
+                    && let Some((blob_id, detail)) = context.split_once(':')
+                    && let Ok(blob_id) = Uuid::parse_str(blob_id)
+                    && let Some((_, reply)) = self.pending_blob_puts.remove(&blob_id)
+                {
+                    let _ = reply.send(Err(SyncError::Other(detail.to_owned())));
                     return;
                 }
                 // Quota is account-wide, not per blob, so every upload in
@@ -1428,7 +1448,7 @@ impl Engine {
                     code,
                     wire::ErrorCode::QuotaExceeded | wire::ErrorCode::AccountRequired
                 ) {
-                    for (_, reply) in self.pending_blob_puts.drain() {
+                    for (_, (_, reply)) in self.pending_blob_puts.drain() {
                         let _ = reply.send(Err(SyncError::QuotaExceeded));
                     }
                 }
@@ -1459,7 +1479,20 @@ impl Engine {
     /// server-side) paths.
     fn forget_space_state(&mut self, space_id: Uuid) {
         self.spaces.remove(&space_id);
+        let removed_docs: std::collections::HashSet<_> = self
+            .docs
+            .iter()
+            .filter_map(|(doc_id, doc)| (doc.space_id == space_id).then_some(*doc_id))
+            .collect();
         self.docs.retain(|_, doc| doc.space_id != space_id);
+        self.outbox
+            .retain(|_, item| !removed_docs.contains(&item.doc_id));
+        self.pending_blob_puts
+            .retain(|_, (pending_space_id, _)| *pending_space_id != space_id);
+        self.pending_blob_gets.retain(|_, waiters| {
+            waiters.retain(|(pending_space_id, _, _)| *pending_space_id != space_id);
+            !waiters.is_empty()
+        });
         self.joins.remove(&space_id);
         self.envelope_queue.remove(&space_id);
         self.envelopes_inflight.remove(&space_id);
@@ -1720,7 +1753,7 @@ impl Engine {
         }
         let frame = crypto::seal_blob(&blob_key, &space_id, &blob_id, &plaintext);
         if self.send(ClientMsg::PutBlob { frame }).await {
-            self.pending_blob_puts.insert(blob_id, reply);
+            self.pending_blob_puts.insert(blob_id, (space_id, reply));
         } else {
             let _ = reply.send(Err(SyncError::Disconnected));
         }
@@ -2000,6 +2033,31 @@ impl Engine {
                 let _ = waiter.send(Ok(()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ack_correlation_rejects_a_tag_reused_for_another_document() {
+        let expected = Uuid::new_v4();
+        let actual = Uuid::new_v4();
+        let item = OutboxItem {
+            doc_id: expected,
+            frame: UpdateFrame {
+                doc_id: expected,
+                epoch: 0,
+                author_device: [0; 32],
+                nonce: [0; 24],
+                ciphertext: Vec::new(),
+                sig: Vec::new(),
+            },
+        };
+        assert!(!ack_belongs_to(Some(&item), actual));
+        assert!(ack_belongs_to(Some(&item), expected));
+        assert!(!ack_belongs_to(None, expected));
     }
 }
 
