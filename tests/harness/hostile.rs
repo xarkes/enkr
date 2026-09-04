@@ -35,6 +35,9 @@ pub struct Hostility {
     /// Corrupt one stored update before it is sent in a backlog response.
     /// The corruption is one-shot so a later resync can recover the frame.
     pub corrupt_update_seq: AtomicU64,
+    /// Replay one stored update as a later sequence number in a backlog.
+    /// This simulates a relay presenting old signed content after revocation.
+    pub replay_update_as_seq: AtomicU64,
 }
 
 impl Hostility {
@@ -52,6 +55,10 @@ impl Hostility {
 
     pub fn corrupt_update_once(&self, seq: u64) {
         self.corrupt_update_seq.store(seq, Ordering::Relaxed);
+    }
+
+    pub fn replay_update_once_as(&self, seq: u64) {
+        self.replay_update_as_seq.store(seq, Ordering::Relaxed);
     }
 }
 
@@ -261,6 +268,18 @@ impl Store for HostileStore {
                 );
                 break;
             }
+        }
+        let replay_seq = self.hostility.replay_update_as_seq.load(Ordering::Relaxed);
+        if replay_seq != 0
+            && let Some((_, bytes)) = updates.first().cloned()
+        {
+            updates.push((replay_seq, bytes));
+            let _ = self.hostility.replay_update_as_seq.compare_exchange(
+                replay_seq,
+                0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
         Ok(updates)
     }

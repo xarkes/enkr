@@ -1505,7 +1505,7 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        if !own && !space.membership.could_ever_write(&frame.author_device) {
+        if !own && !space.membership.can_author_content(&frame.author_device) {
             // Not necessarily hostile, and usually not: neither adding a member
             // nor promoting one bumps the epoch, so an already-connected member
             // has no reason to have refetched the log since either happened —
@@ -1810,7 +1810,7 @@ impl Engine {
         // seal and sign a valid snapshot with the space key it legitimately
         // holds, and accepting that hands every reader an edit channel wider
         // than the one `flush_doc` denies them.
-        if !own && !space.membership.could_ever_write(&frame.author_device) {
+        if !own && !space.membership.can_author_content(&frame.author_device) {
             self.warn_security(format!(
                 "doc {doc_id}: snapshot from a device with no write rights"
             ));
@@ -1911,7 +1911,7 @@ impl Engine {
             return;
         };
         let own = frame.author_device == self.identity.device_pk();
-        if !own && !space.membership.could_ever_write(&frame.author_device) {
+        if !own && !space.membership.can_author_content(&frame.author_device) {
             // The refreshed log still doesn't grant this device write rights —
             // it is unknown, or it is a reader. Keep the frame (a later Add or
             // promotion may yet explain it) but say so: after a refetch, this

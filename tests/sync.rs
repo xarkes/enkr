@@ -65,6 +65,54 @@ async fn corrupt_backlog_frame_is_recovered_by_resync() {
     assert_eq!(converge(&[&owner, &joiner], doc).await, "recoverable");
 }
 
+/// A removed writer's valid old-epoch frame must not be accepted as new
+/// content when a hostile relay replays it after revocation.
+#[tokio::test]
+async fn removed_writer_frame_is_rejected_by_peers() {
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+    let owner = server.client();
+    let removed = server.client();
+    let peer = server.client();
+    wait_connected(&owner).await;
+    wait_connected(&removed).await;
+    wait_connected(&peer).await;
+
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    invite_and_join(&owner, &removed, space).await;
+    invite_and_join(&owner, &peer, space).await;
+    removed.open_doc(space, doc).await.unwrap();
+    peer.open_doc(space, doc).await.unwrap();
+
+    removed.insert_text(doc, 0, "before-removal").await.unwrap();
+    converge(&[&owner, &removed, &peer], doc).await;
+
+    owner
+        .remove_member(space, removed.device_pk())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Re-offer the already-stored frame under a fresh sequence number. The
+    // signature and old epoch are valid, but its author is now revoked.
+    hostility.replay_update_once_as(2);
+    let mut events = peer.events();
+    peer.resync().unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut content_events = 0;
+    while let Ok(event) = events.try_recv() {
+        if matches!(event, SyncEvent::DocBytes { .. }) {
+            content_events += 1;
+        }
+    }
+    assert_eq!(
+        content_events, 0,
+        "peer accepted replayed content from a removed writer"
+    );
+    assert_eq!(peer.doc_text(doc).await.unwrap(), "before-removal");
+}
+
 /// An accountless authenticated key is only an invited collaborator identity;
 /// it must not create durable relay state merely by connecting. Otherwise a
 /// client can exhaust the database by reconnecting with fresh keypairs.
