@@ -31,27 +31,12 @@ jobs:
             binary: enkr.exe
 
     steps:
-      # Cargo.toml uses local patches for the protocol and UI crates. Keep
-      # those checkouts beside enkr so the release build uses the same sources
-      # as local development without involving the private syncd repository.
       - name: Checkout enkr
         uses: actions/checkout@v4
         with:
           path: enkr
 
-      - name: Checkout enkr-proto
-        uses: actions/checkout@v4
-        with:
-          repository: xarkes/enkr-proto
-          path: enkr-proto
-
-      - name: Checkout mae
-        uses: actions/checkout@v4
-        with:
-          repository: xarkes/mae
-          path: mae
-
-      - name: Satisfy private optional dependency
+      - name: Satisfy private dev dependency
         shell: bash
         run: |
           mkdir -p enkr-syncd

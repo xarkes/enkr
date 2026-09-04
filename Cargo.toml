@@ -34,13 +34,13 @@ serde = { version = "1", features = ["derive"] }
 # longer pulled that in.
 futures-util = { version = "0.3", features = ["sink"] }
 log = "0.4"
-
-# The in-process sync server for the `--showcase` demo (feature `testkit`).
-enkr-syncd = { path = "../enkr-syncd", optional = true }
 bip39 = { version = "2", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mae = { git = "https://github.com/xarkes/mae.git" }
+# Testkit/showcase only. This optional dependency is excluded from normal
+# release builds because the `testkit` feature is not enabled there.
+enkr-syncd = { path = "../enkr-syncd", optional = true }
 # Pinned to 0.32 so libsqlite3-sys unifies with sqlx-sqlite (enkr-syncd); both
 # link the native sqlite3 and cargo allows only one linking version per graph.
 # Native only — `bundled` compiles SQLite's C sources via `cc`, which has no
@@ -170,9 +170,8 @@ enkr = { path = ".", features = ["testkit", "cdp"] }
 
 [features]
 png_capture = ["mae/png_capture"]
-# `enkr --showcase`: fully automated, screen-recordable collaboration demo.
-# Runs an in-process sync server, a headless second client, and drives both
-# clients through their real widgets via the testkit harness.
+# Testkit-only support: the showcase uses the optional in-process relay, while
+# normal release/library builds never enable or link it.
 testkit = ["mae/testkit", "dep:enkr-syncd", "tokio/rt-multi-thread"]
 # `mae::testkit::cdp::CdpDriver` (tests/testkit_driver.rs): drives a real
 # page in a locally installed headless Chromium — see mae/src/testkit/cdp.rs.
