@@ -1515,7 +1515,6 @@ impl Engine {
             // reader's forgery parks here too and is simply never retried into
             // acceptance; the buffer is bounded either way.
             log::debug!("doc {doc_id}: frame from a device the log does not authorise");
-            self.note_seq(doc_id, seq); // frontier advances; the frame is kept
             self.defer_frame(doc_id, frame);
             self.deferred_membership_request(space_id);
             return;
@@ -1525,8 +1524,9 @@ impl Engine {
             let missing_epoch = frame.epoch;
             log::debug!("doc {doc_id}: missing epoch {missing_epoch}, fetching envelopes");
             let space_id_copy = space_id;
-            // note_seq so the frontier advances; the frame itself is retained.
-            self.note_seq(doc_id, seq);
+            // Do not advance the frontier until this frame authenticates and
+            // decrypts. It may become usable once the envelope arrives, and a
+            // resubscribe must be able to request this sequence again.
             self.defer_frame(doc_id, frame);
             self.deferred_envelope_request(space_id_copy);
             return;
@@ -1544,7 +1544,9 @@ impl Engine {
             }
             Err(err) => {
                 self.warn_security(format!("doc {doc_id} seq {seq}: {err}"));
-                self.note_seq(doc_id, seq);
+                // Rejected content must not retire this sequence. Otherwise a
+                // corrupt or hostile relay response permanently hides the
+                // valid frame that the next resync would have returned.
             }
         }
     }

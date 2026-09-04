@@ -149,6 +149,10 @@ impl TestClient {
         self.client.flush().await
     }
 
+    pub fn resync(&self) -> Result<(), SyncError> {
+        self.client.resync()
+    }
+
     pub async fn create_space(&self) -> Result<Uuid, SyncError> {
         self.client.create_space().await
     }

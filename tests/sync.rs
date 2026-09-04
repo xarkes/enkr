@@ -34,6 +34,37 @@ async fn two_clients_live_edit_converges() {
     assert_eq!(text, "hello world");
 }
 
+/// A corrupt backlog frame must not retire its sequence number. Once the
+/// relay serves the intact frame on resync, the client must still apply it.
+#[tokio::test]
+async fn corrupt_backlog_frame_is_recovered_by_resync() {
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+
+    owner.insert_text(doc, 0, "recoverable").await.unwrap();
+    owner.flush().await.unwrap();
+    assert_eq!(converge(&[&owner], doc).await, "recoverable");
+
+    // Make the first cold-subscribe response contain a wire-valid but
+    // cryptographically invalid copy of sequence 1.
+    hostility.corrupt_update_once(1);
+    let joiner = server.client();
+    wait_connected(&joiner).await;
+    invite_and_join(&owner, &joiner, space).await;
+    joiner.open_doc(space, doc).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(joiner.doc_text(doc).await.unwrap(), "");
+
+    // The one-shot hostile response is now disabled. Resync must ask for seq 1
+    // again; the receive path must not have retired the rejected sequence.
+    joiner.resync().unwrap();
+    assert_eq!(converge(&[&owner, &joiner], doc).await, "recoverable");
+}
+
 /// An accountless authenticated key is only an invited collaborator identity;
 /// it must not create durable relay state merely by connecting. Otherwise a
 /// client can exhaust the database by reconnecting with fresh keypairs.

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use enkr_proto::membership::MemberRole;
-use enkr_proto::wire::DevicePk;
+use enkr_proto::wire::{self, DevicePk, UpdateFrame};
 use enkr_syncd::storage::{
     Account, EnvelopeRow, NewAccount, Result, SnapshotRow, SqliteStore, Store, StoreError,
 };
@@ -32,6 +32,9 @@ pub struct Hostility {
     /// Replace only the unsigned snapshot metadata value returned by the store.
     /// The encoded `SnapshotFrame` remains untouched, simulating a lying relay.
     pub lie_snapshot_covers_seq: AtomicU64,
+    /// Corrupt one stored update before it is sent in a backlog response.
+    /// The corruption is one-shot so a later resync can recover the frame.
+    pub corrupt_update_seq: AtomicU64,
 }
 
 impl Hostility {
@@ -45,6 +48,10 @@ impl Hostility {
 
     pub fn lie_snapshot_covers_seq(&self, n: u64) {
         self.lie_snapshot_covers_seq.store(n, Ordering::Relaxed);
+    }
+
+    pub fn corrupt_update_once(&self, seq: u64) {
+        self.corrupt_update_seq.store(seq, Ordering::Relaxed);
     }
 }
 
@@ -231,7 +238,31 @@ impl Store for HostileStore {
         if self.hostility.fail_backlog_reads.load(Ordering::Relaxed) {
             return Err(StoreError::NotFound("injected backlog read failure"));
         }
-        self.inner.updates_since(doc_id, after_seq, limit).await
+        let mut updates = self.inner.updates_since(doc_id, after_seq, limit).await?;
+        let target = self.hostility.corrupt_update_seq.load(Ordering::Relaxed);
+        if target != 0 {
+            for (seq, bytes) in &mut updates {
+                if *seq != target {
+                    continue;
+                }
+                let Ok(mut frame) = wire::decode::<UpdateFrame>(bytes) else {
+                    continue;
+                };
+                let Some(last) = frame.ciphertext.last_mut() else {
+                    continue;
+                };
+                *last ^= 0x01;
+                *bytes = wire::encode(&frame).expect("update frame encodes");
+                let _ = self.hostility.corrupt_update_seq.compare_exchange(
+                    target,
+                    0,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                break;
+            }
+        }
+        Ok(updates)
     }
 
     async fn head_seq(&self, doc_id: &Uuid) -> Result<u64> {
