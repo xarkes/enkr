@@ -20,13 +20,6 @@ fn main() {
         env!("ENKR_GIT_HASH")
     );
 
-    // Fully automated, screen-recordable collaboration demo (see showcase.rs).
-    #[cfg(feature = "testkit")]
-    if std::env::args().any(|arg| arg == "--showcase") {
-        enkr::showcase::run();
-        return;
-    }
-
     #[cfg(feature = "png_capture")]
     let capture_path = parse_capture_arg();
     let mut ui = IMUI::new(960, 640, "Enkr");

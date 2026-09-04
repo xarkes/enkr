@@ -36,20 +36,6 @@ jobs:
         with:
           path: enkr
 
-      - name: Satisfy private dev dependency
-        shell: bash
-        run: |
-          mkdir -p enkr-syncd/src
-          printf '%s\n' \
-            '[package]' \
-            'name = "enkr-syncd"' \
-            'version = "0.0.1"' \
-            'edition = "2024"' \
-            > enkr-syncd/Cargo.toml
-          printf '%s\n' \
-            '# Placeholder only; the optional relay is not enabled in release builds.' \
-            > enkr-syncd/src/lib.rs
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

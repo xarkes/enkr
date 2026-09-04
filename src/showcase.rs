@@ -1,4 +1,4 @@
-//! `enkr --showcase` (feature `testkit`): a fully automated, screen-recordable
+//! `enkr-e2e --bin showcase`: a fully automated, screen-recordable
 //! collaboration demo. Nothing here is faked — both clients are real
 //! [`EnkrState`]s driven exclusively through their widgets, exactly like the
 //! `app_sync.rs` integration tests, against a real in-process `enkr-syncd`.
@@ -33,11 +33,11 @@ use mae::render::RectCoords;
 use mae::testkit::{UiHarness, UiSnapshot};
 use mae::ui::Color;
 
-use crate::app::{
+use enkr::app::{
     DARK_THEME_ICON, EnkrState, RENDER_MARKDOWN_ICON, SEARCH_ICON, SETTINGS_ICON, render,
 };
-use crate::note::NoteDatabase;
-use crate::sync::IdentityStore;
+use enkr::note::NoteDatabase;
+use enkr::sync::IdentityStore;
 
 /// Folder name of the sample repo, and therefore the imported Space's name.
 const REPO_NAME: &str = "horizon-docs";

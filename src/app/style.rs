@@ -8,13 +8,13 @@ pub(crate) const SPACE_ICON: &str = "\u{e865}";
 pub(crate) const FOLDER_ICON: &str = "\u{e2c7}";
 pub(crate) const FOLDER_OPEN_ICON: &str = "\u{e2c8}";
 pub(crate) const LIGHT_THEME_ICON: &str = "\u{e518}";
-pub(crate) const DARK_THEME_ICON: &str = "\u{e51c}";
+pub const DARK_THEME_ICON: &str = "\u{e51c}";
 pub(crate) const IMAGE_ICON: &str = "\u{e3f4}";
 pub(crate) const WARNING_ICON: &str = "\u{e002}";
-pub(crate) const SETTINGS_ICON: &str = "\u{e8b8}";
+pub const SETTINGS_ICON: &str = "\u{e8b8}";
 pub(crate) const CLOSE_ICON: &str = "\u{e5cd}";
-pub(crate) const SEARCH_ICON: &str = "\u{e8b6}";
-pub(crate) const RENDER_MARKDOWN_ICON: &str = "\u{e8f4}";
+pub const SEARCH_ICON: &str = "\u{e8b6}";
+pub const RENDER_MARKDOWN_ICON: &str = "\u{e8f4}";
 pub(crate) const SOURCE_MARKDOWN_ICON: &str = "\u{e86f}";
 pub(crate) const MORE_ICON: &str = "\u{e5d4}";
 /// `expand_more` — the space switcher's dropdown affordance.

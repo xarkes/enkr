@@ -7,8 +7,6 @@
 pub mod app;
 pub mod note;
 pub mod search;
-#[cfg(feature = "testkit")]
-pub mod showcase;
 pub mod sync;
 #[cfg(feature = "cdp")]
 pub mod testkit_support;

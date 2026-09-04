@@ -41,6 +41,7 @@ pub(crate) use sidebar::*;
 pub(crate) use state::*;
 pub use state::{EnkrState, META_RECOVERY_ACKED};
 pub(crate) use style::*;
+pub use style::{DARK_THEME_ICON, RENDER_MARKDOWN_ICON, SEARCH_ICON, SETTINGS_ICON};
 pub(crate) use views::*;
 const SPLITTER_WIDTH: f32 = 1.0;
 const SPLITTER_HIT_PADDING_X: f32 = 5.0;

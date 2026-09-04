@@ -1,0 +1,27 @@
+[package]
+name = "enkr-e2e"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+enkr = { path = "..", features = ["cdp"] }
+enkr-proto = { git = "https://github.com/xarkes/enkr-proto.git" }
+enkr-syncd = { path = "../../enkr-syncd" }
+mae = { git = "https://github.com/xarkes/mae.git", features = ["testkit", "cdp"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+async-trait = "0.1"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+yrs = "0.26.0"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = "0.26"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[features]
+cdp = []
+
+[patch."https://github.com/xarkes/enkr-proto.git"]
+enkr-proto = { path = "../../enkr-proto" }
+
+[patch."https://github.com/xarkes/mae.git"]
+mae = { path = "../../mae" }
