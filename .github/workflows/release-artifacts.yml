@@ -40,7 +40,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes pkg-config libx11-dev libgl1-mesa-dev
+          sudo apt-get install --yes \
+            pkg-config \
+            libx11-dev \
+            libgl1-mesa-dev \
+            libfontconfig1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
