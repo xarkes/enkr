@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use enkr_proto::membership::MemberRole;
-use enkr_proto::wire::DevicePk;
+use enkr_proto::wire::IdentityPk;
 use enkr_syncd::storage::{
     Account, EnvelopeRow, NewAccount, Result, SnapshotRow, SqliteStore, Store,
 };
@@ -31,9 +31,9 @@ pub struct StoreMetrics {
     pub put_snapshot: AtomicU64,
     /// Full membership-log fetches (no cursor today).
     pub membership_log: AtomicU64,
-    pub envelopes_for_device: AtomicU64,
+    pub envelopes_for_identity: AtomicU64,
     /// The unindexed server-wide scan.
-    pub spaces_for_device: AtomicU64,
+    pub spaces_for_identity: AtomicU64,
     pub append_update: AtomicU64,
     pub create_doc: AtomicU64,
     pub gc_eligible: AtomicU64,
@@ -58,8 +58,8 @@ impl StoreMetrics {
             &self.latest_snapshot,
             &self.put_snapshot,
             &self.membership_log,
-            &self.envelopes_for_device,
-            &self.spaces_for_device,
+            &self.envelopes_for_identity,
+            &self.spaces_for_identity,
             &self.append_update,
             &self.create_doc,
             &self.gc_eligible,
@@ -73,7 +73,7 @@ impl StoreMetrics {
     pub fn report(&self, label: &str) {
         println!(
             "[{label}] doc_space={} doc_spaces={} is_active_member={} updates_since={} latest_snapshot={} \
-             put_snapshot={} membership_log={} envelopes_for_device={} spaces_for_device={} \
+             put_snapshot={} membership_log={} envelopes_for_identity={} spaces_for_identity={} \
              append_update={} create_doc={} gc_eligible={} gc_envelopes={}",
             Self::get(&self.doc_space),
             Self::get(&self.doc_spaces),
@@ -82,8 +82,8 @@ impl StoreMetrics {
             Self::get(&self.latest_snapshot),
             Self::get(&self.put_snapshot),
             Self::get(&self.membership_log),
-            Self::get(&self.envelopes_for_device),
-            Self::get(&self.spaces_for_device),
+            Self::get(&self.envelopes_for_identity),
+            Self::get(&self.spaces_for_identity),
             Self::get(&self.append_update),
             Self::get(&self.create_doc),
             Self::get(&self.gc_eligible),
@@ -123,12 +123,12 @@ impl Store for MeteredStore {
         self.inner.set_account_expiry(account_id, expires_at).await
     }
 
-    async fn bind_device_account(
+    async fn bind_identity_account(
         &self,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         account_id: Option<&Uuid>,
     ) -> Result<()> {
-        self.inner.bind_device_account(device_pk, account_id).await
+        self.inner.bind_identity_account(identity_pk, account_id).await
     }
 
     async fn space_owner_account(&self, space_id: &Uuid) -> Result<Option<Uuid>> {
@@ -139,8 +139,8 @@ impl Store for MeteredStore {
         self.inner.recompute_usage().await
     }
 
-    async fn upsert_device(&self, device_pk: &DevicePk, kex_pk: &[u8; 32], now: i64) -> Result<()> {
-        self.inner.upsert_device(device_pk, kex_pk, now).await
+    async fn upsert_identity(&self, identity_pk: &IdentityPk, kex_pk: &[u8; 32], now: i64) -> Result<()> {
+        self.inner.upsert_identity(identity_pk, kex_pk, now).await
     }
 
     async fn space_epoch(&self, space_id: &Uuid) -> Result<Option<u32>> {
@@ -150,7 +150,7 @@ impl Store for MeteredStore {
     async fn create_space(
         &self,
         space_id: &Uuid,
-        creator: &DevicePk,
+        creator: &IdentityPk,
         signed_op: &[u8],
         envelopes: &[EnvelopeRow],
         now: i64,
@@ -163,7 +163,7 @@ impl Store for MeteredStore {
     async fn add_member(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         role: MemberRole,
         epoch_added: u32,
         op_seq: u64,
@@ -174,7 +174,7 @@ impl Store for MeteredStore {
         self.inner
             .add_member(
                 space_id,
-                device_pk,
+                identity_pk,
                 role,
                 epoch_added,
                 op_seq,
@@ -188,7 +188,7 @@ impl Store for MeteredStore {
     async fn remove_member(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         new_epoch: u32,
         op_seq: u64,
         signed_op: &[u8],
@@ -197,27 +197,27 @@ impl Store for MeteredStore {
     ) -> Result<()> {
         self.inner
             .remove_member(
-                space_id, device_pk, new_epoch, op_seq, signed_op, envelopes, now,
+                space_id, identity_pk, new_epoch, op_seq, signed_op, envelopes, now,
             )
             .await
     }
 
-    async fn is_active_member(&self, space_id: &Uuid, device_pk: &DevicePk) -> Result<bool> {
+    async fn is_active_member(&self, space_id: &Uuid, identity_pk: &IdentityPk) -> Result<bool> {
         StoreMetrics::bump(&self.metrics.is_active_member);
-        self.inner.is_active_member(space_id, device_pk).await
+        self.inner.is_active_member(space_id, identity_pk).await
     }
 
     async fn member_role(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
     ) -> Result<Option<MemberRole>> {
-        self.inner.member_role(space_id, device_pk).await
+        self.inner.member_role(space_id, identity_pk).await
     }
 
-    async fn spaces_for_device(&self, device_pk: &DevicePk) -> Result<Vec<Uuid>> {
-        StoreMetrics::bump(&self.metrics.spaces_for_device);
-        self.inner.spaces_for_device(device_pk).await
+    async fn spaces_for_identity(&self, identity_pk: &IdentityPk) -> Result<Vec<Uuid>> {
+        StoreMetrics::bump(&self.metrics.spaces_for_identity);
+        self.inner.spaces_for_identity(identity_pk).await
     }
 
     async fn delete_space(&self, space_id: &Uuid) -> Result<()> {
@@ -233,13 +233,13 @@ impl Store for MeteredStore {
         self.inner.membership_log(space_id).await
     }
 
-    async fn envelopes_for_device(
+    async fn envelopes_for_identity(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
-        StoreMetrics::bump(&self.metrics.envelopes_for_device);
-        self.inner.envelopes_for_device(space_id, device_pk).await
+        StoreMetrics::bump(&self.metrics.envelopes_for_identity);
+        self.inner.envelopes_for_identity(space_id, identity_pk).await
     }
 
     async fn create_doc(&self, doc_id: &Uuid, space_id: &Uuid, now: i64) -> Result<()> {

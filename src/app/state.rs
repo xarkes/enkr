@@ -97,7 +97,7 @@ pub(crate) enum RecoveryDialog {
     /// connect, which requires an acknowledgement rather than a close button —
     /// the whole point is that it is not dismissed without being read.
     Reveal { phrase: String, first_run: bool },
-    /// Typing a phrase in to rebuild this device's identity.
+    /// Typing a phrase in to restore this installation to an identity.
     Restore {
         input: String,
         error: Option<String>,
@@ -156,7 +156,7 @@ pub struct EnkrState {
     // -- synchronization ----------------------------------------------------
     pub sync: Option<AppSync>,
     pub(crate) waker: Option<RepaintWaker>,
-    /// Test hook: where the device identity lives. Defaults to a flat key
+    /// Test hook: where the cryptographic identity lives. Defaults to a flat key
     /// file next to the note database (the only persistent sync state).
     pub sync_identity: Option<IdentityStore>,
     /// Omit the hardcoded default server from the picker. Set by demo runs
@@ -230,7 +230,7 @@ pub struct EnkrState {
     /// `file_explorer` is `Some`.
     pub(crate) file_pick_mode: FilePickMode,
     /// Remote space id awaiting a "delete for everyone" confirmation, opened
-    /// from the sync window for spaces this device owns.
+    /// from the sync window for spaces this installation owns.
     pub(crate) delete_space_confirm: Option<Uuid>,
     /// The open recovery-phrase dialog, if any.
     pub(crate) recovery: Option<RecoveryDialog>,
@@ -238,7 +238,7 @@ pub struct EnkrState {
     /// 0..1 cross-fade for the welcome body, restarted on every tab change so
     /// the switch reads as one panel replacing another rather than a jump.
     pub(crate) welcome_fade: f32,
-    /// Where this device's seed lives, once a connection has resolved it.
+    /// Where this identity's seed lives, once a connection has resolved it.
     /// Needed to read the phrase back and to restore one.
     pub identity_store: Option<IdentityStore>,
     /// The active note's editor box from the previous frame, used to anchor
@@ -421,7 +421,7 @@ impl EnkrState {
     }
 
     /// Delete an image blob locally and propagate the deletion into the space's
-    /// index doc when the space is synced, so peers and this device after a
+    /// index doc when the space is synced, so peers and this installation after a
     /// restart stop re-downloading it.
     pub(crate) fn delete_blob(&mut self, blob_id: &str) {
         if let Some(sync) = self.sync.as_mut()
@@ -466,17 +466,17 @@ impl EnkrState {
         self.notes.meta_set(META_NICKNAME, &nickname);
         // Persisted across launches on both targets: a real key file
         // natively, `localStorage` in the browser (there is no filesystem
-        // for `IdentityStore::Path` to use there — `default_device_key_
+        // for `IdentityStore::Path` to use there — `default_identity_key_
         // path()` would degrade to a meaningless relative path via
         // `platform_config_dir`'s fallback, and `std::fs::read` on
-        // wasm32-unknown-unknown always fails). The device key *is* this
-        // device's membership in every space it has been admitted to, so
+        // wasm32-unknown-unknown always fails). The identity key *is* this
+        // identity's membership in every space it has been admitted to, so
         // losing it on reload silently orphans the device — see
         // `sync/identity.rs`.
         let identity = self.sync_identity.clone().unwrap_or_else(|| {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                IdentityStore::Path(default_device_key_path())
+                IdentityStore::Path(default_identity_key_path())
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -490,7 +490,7 @@ impl EnkrState {
                 sync.adopt(&self.notes);
                 self.sync = Some(sync);
                 self.identity_store = Some(identity);
-                // The device key is created by that call, and from here on it is
+                // The identity key is created by that call, and from here on it is
                 // the only thing that can read anything synced. Prompt once,
                 // now — not at first launch, when a local-only install has no
                 // identity yet and nothing at stake.
@@ -517,7 +517,7 @@ impl EnkrState {
     }
 
     /// The sync engine exists but has stopped for good: the relay refused this
-    /// device's credentials, or speaks a protocol this build cannot talk.
+    /// identity's credentials, or speaks a protocol this build cannot talk.
     ///
     /// Both are terminal by design — the engine deliberately stops retrying,
     /// because asking again with the same token or the same build cannot
@@ -1046,7 +1046,7 @@ impl EnkrState {
         self.notes.meta_set(META_RECOVERY_ACKED, "1");
     }
 
-    /// Rebuild this device's identity from `phrase`.
+    /// Restore this installation to the identity represented by `phrase`.
     ///
     /// Takes effect on the next launch: the sync engine resolved the old
     /// identity when it started and there is no way to swap it underneath a
@@ -1239,7 +1239,7 @@ impl EnkrState {
                 let count = self.notes.note_count_in_space(space.id);
                 let where_ = match space.server.as_deref() {
                     Some(server) => format!("{count} notes \u{00b7} synced @ {server}"),
-                    None => format!("{count} notes \u{00b7} on this device"),
+                    None => format!("{count} notes \u{00b7} on this installation"),
                 };
                 PaletteRow {
                     title: space.name.clone(),
@@ -1295,7 +1295,7 @@ impl EnkrState {
             // than after the fact.
             let audience = match space.server.as_deref() {
                 Some(server) => format!("shared with everyone in this space \u{00b7} {server}"),
-                None => "stays on this device".to_string(),
+                None => "stays on this installation".to_string(),
             };
 
             let mut candidates: Vec<(Option<Uuid>, String)> = vec![(None, space.name.clone())];
@@ -1856,7 +1856,7 @@ impl EnkrState {
 /// would otherwise each repeat the peek-and-name dance.
 pub(crate) struct RemoteRow {
     pub space_id: Uuid,
-    /// Set when this device already mirrors the space.
+    /// Set when this installation already mirrors the space.
     pub local: Option<i64>,
     /// `None` until a peek decrypts the space's index far enough to read it.
     pub name: Option<String>,

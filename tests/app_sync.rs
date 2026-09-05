@@ -4,7 +4,7 @@
 //!
 //! Base scenario:
 //! - Client A pushes a local Space to remote
-//! - Client A shares the Space with Client B (typed device key)
+//! - Client A shares the Space with Client B (typed identity key)
 //! - Client B fetches remote Spaces and syncs the shared one
 //! - Client B modifies that Space's first note; A sees it
 //! - Client A modifies the note as well; B receives it
@@ -19,7 +19,7 @@ use enkr::app::{EnkrState, render};
 use enkr::note::NoteDatabase;
 use enkr::sync::{IdentityStore, MemberRole};
 use enkr_syncd::storage::{
-    Account, DevicePk, EnvelopeRow, NewAccount, Result as StoreResult, SnapshotRow, SqliteStore,
+    Account, IdentityPk, EnvelopeRow, NewAccount, Result as StoreResult, SnapshotRow, SqliteStore,
     Store,
 };
 use enkr_syncd::{ServerConfig, ServerHandle, serve};
@@ -204,12 +204,12 @@ impl Store for CountingStore {
         self.inner.set_account_expiry(account_id, expires_at).await
     }
 
-    async fn bind_device_account(
+    async fn bind_identity_account(
         &self,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         account_id: Option<&Uuid>,
     ) -> StoreResult<()> {
-        self.inner.bind_device_account(device_pk, account_id).await
+        self.inner.bind_identity_account(identity_pk, account_id).await
     }
 
     async fn space_owner_account(&self, space_id: &Uuid) -> StoreResult<Option<Uuid>> {
@@ -220,13 +220,13 @@ impl Store for CountingStore {
         self.inner.recompute_usage().await
     }
 
-    async fn upsert_device(
+    async fn upsert_identity(
         &self,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         kex_pk: &[u8; 32],
         now: i64,
     ) -> StoreResult<()> {
-        self.inner.upsert_device(device_pk, kex_pk, now).await
+        self.inner.upsert_identity(identity_pk, kex_pk, now).await
     }
     async fn space_epoch(&self, space_id: &Uuid) -> StoreResult<Option<u32>> {
         self.inner.space_epoch(space_id).await
@@ -234,7 +234,7 @@ impl Store for CountingStore {
     async fn create_space(
         &self,
         space_id: &Uuid,
-        creator: &DevicePk,
+        creator: &IdentityPk,
         signed_op: &[u8],
         envelopes: &[EnvelopeRow],
         now: i64,
@@ -246,7 +246,7 @@ impl Store for CountingStore {
     async fn add_member(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         role: MemberRole,
         epoch_added: u32,
         op_seq: u64,
@@ -257,7 +257,7 @@ impl Store for CountingStore {
         self.inner
             .add_member(
                 space_id,
-                device_pk,
+                identity_pk,
                 role,
                 epoch_added,
                 op_seq,
@@ -270,7 +270,7 @@ impl Store for CountingStore {
     async fn remove_member(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         new_epoch: u32,
         op_seq: u64,
         signed_op: &[u8],
@@ -279,22 +279,22 @@ impl Store for CountingStore {
     ) -> StoreResult<()> {
         self.inner
             .remove_member(
-                space_id, device_pk, new_epoch, op_seq, signed_op, envelopes, now,
+                space_id, identity_pk, new_epoch, op_seq, signed_op, envelopes, now,
             )
             .await
     }
-    async fn is_active_member(&self, space_id: &Uuid, device_pk: &DevicePk) -> StoreResult<bool> {
-        self.inner.is_active_member(space_id, device_pk).await
+    async fn is_active_member(&self, space_id: &Uuid, identity_pk: &IdentityPk) -> StoreResult<bool> {
+        self.inner.is_active_member(space_id, identity_pk).await
     }
     async fn member_role(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
     ) -> StoreResult<Option<MemberRole>> {
-        self.inner.member_role(space_id, device_pk).await
+        self.inner.member_role(space_id, identity_pk).await
     }
-    async fn spaces_for_device(&self, device_pk: &DevicePk) -> StoreResult<Vec<Uuid>> {
-        self.inner.spaces_for_device(device_pk).await
+    async fn spaces_for_identity(&self, identity_pk: &IdentityPk) -> StoreResult<Vec<Uuid>> {
+        self.inner.spaces_for_identity(identity_pk).await
     }
     async fn delete_space(&self, space_id: &Uuid) -> StoreResult<()> {
         self.inner.delete_space(space_id).await
@@ -305,12 +305,12 @@ impl Store for CountingStore {
     async fn membership_log(&self, space_id: &Uuid) -> StoreResult<Vec<Vec<u8>>> {
         self.inner.membership_log(space_id).await
     }
-    async fn envelopes_for_device(
+    async fn envelopes_for_identity(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
     ) -> StoreResult<Vec<(u32, Vec<u8>)>> {
-        self.inner.envelopes_for_device(space_id, device_pk).await
+        self.inner.envelopes_for_identity(space_id, identity_pk).await
     }
     async fn create_doc(&self, doc_id: &Uuid, space_id: &Uuid, now: i64) -> StoreResult<()> {
         self.inner.create_doc(doc_id, space_id, now).await
@@ -407,7 +407,7 @@ impl App {
     }
 
     /// `notes_db = Some(path)` makes the note store file-backed (durability /
-    /// restart scenarios). The device key always lives at `sync_db` so the
+    /// restart scenarios). The identity key always lives at `sync_db` so the
     /// identity survives disconnects and "crashes".
     fn with_files(notes_db: Option<PathBuf>, sync_db: PathBuf) -> Self {
         Self::build(notes_db, sync_db, true)
@@ -723,7 +723,7 @@ fn synced_note_with(state: &EnkrState, marker: &str) -> Option<String> {
 }
 
 /// Full UI-driven setup shared by the scenarios: both clients connect, A
-/// pushes its "Shared" space, invites B by typed device key, and B fetches it
+/// pushes its "Shared" space, invites B by typed identity key, and B fetches it
 /// until the Welcome note is mirrored. Returns `(a, b, b_synced_note_id)`;
 /// A's copy of the note keeps its local id `"Welcome"`.
 fn establish_shared_pair(server: &TestServer) -> (App, App, String) {
@@ -773,7 +773,7 @@ fn establish_shared_pair_apps(
         },
     );
 
-    // -- A invites B using B's device key (read from B's sync window) ---------
+    // -- A invites B using B's identity key (read from B's sync window) ---------
     b.open_sync_from_pill();
     let b_key = {
         let snap = b.frame();
@@ -781,7 +781,7 @@ fn establish_shared_pair_apps(
             .iter()
             .filter_map(|node| node.text.clone())
             .find(|text| text.len() == 128 && text.chars().all(|c| c.is_ascii_hexdigit()))
-            .expect("device key visible in B's sync window")
+            .expect("identity key visible in B's sync window")
     };
     b.harness.key_press(mae::os::OSKeyCode::KeyEscape);
     b.frame();
@@ -941,7 +941,7 @@ fn reader_pulled_space_makes_editor_read_only() {
 /// A peer that never set a nickname still broadcasts presence. The original bug
 /// dropped unnamed peers on both the send and decode paths, so a Mac↔Windows
 /// pair where one side had no nickname could see only the named side's caret.
-/// The unnamed peer now appears with a short device-id label.
+/// The unnamed peer now appears with a short identity-id label.
 #[test]
 fn unnamed_peer_caret_is_visible_to_others() {
     let server = TestServer::start();
@@ -949,8 +949,8 @@ fn unnamed_peer_caret_is_visible_to_others() {
         establish_shared_pair_apps(&server, App::new(), App::new(), "", MemberRole::Writer);
 
     // B set no nickname, so peers label it by the first 4 bytes of its device
-    // key (hex(device_pk ‖ kex_pk) — the first 8 chars are device_pk[..4]).
-    let b_label = b.state.sync.as_ref().unwrap().device_key()[..8].to_string();
+    // key (hex(identity_pk ‖ kex_pk) — the first 8 chars are identity_pk[..4]).
+    let b_label = b.state.sync.as_ref().unwrap().identity_key()[..8].to_string();
 
     // B plants a caret by editing the shared note.
     b.click_sidebar_note("Welcome");
@@ -958,7 +958,7 @@ fn unnamed_peer_caret_is_visible_to_others() {
     b.type_into_editor("HELLO_FROM_B ");
 
     // A receives B's edit (data path) and sees B's caret labeled with the
-    // device id (presence path no longer drops the unnamed peer).
+    // identity id (presence path no longer drops the unnamed peer).
     pump_until(
         &mut [&mut a, &mut b],
         "A sees the unnamed peer's edit and caret",
@@ -1078,7 +1078,7 @@ fn deleted_image_blob_is_retracted_from_peers() {
         bytes.clone(),
     );
 
-    // Both devices must first hold the uploaded, advertised blob.
+    // Both identities must first hold the uploaded, advertised blob.
     pump_until(&mut [&mut a, &mut b], "peer adopts the blob", |apps| {
         apps[1]
             .state
@@ -1947,7 +1947,7 @@ fn typing_through_reconnect_converges() {
 
 /// Crash recovery (the `needs_push` durability contract): B edits offline,
 /// the app dies without a clean shutdown, and a fresh "process" booting from
-/// the same note database + device key must reship the flagged content on
+/// the same note database + identity key must reship the flagged content on
 /// its first connect — nothing depends on engine-side persistence (there is
 /// none anymore).
 #[test]
@@ -2048,7 +2048,7 @@ fn space_bound_to_one_server_is_not_pushed_to_another() {
         "space must stay bound to server A"
     );
 
-    // Server B must hold no spaces for this device — nothing was pushed to it.
+    // Server B must hold no spaces for this installation — nothing was pushed to it.
     app.state.sync.as_mut().unwrap().refresh_remote_spaces();
     let until = Instant::now() + Duration::from_secs(1);
     while Instant::now() < until {
@@ -2063,7 +2063,7 @@ fn space_bound_to_one_server_is_not_pushed_to_another() {
         .remote_spaces(&app.state.notes);
     assert!(
         remote_spaces.is_empty(),
-        "server B must hold no spaces for this device, found {remote_spaces:?}"
+        "server B must hold no spaces for this installation, found {remote_spaces:?}"
     );
 }
 
@@ -2354,7 +2354,7 @@ fn a_space_refused_for_want_of_an_account_is_unmarked_and_reported() {
 /// answering "so where do my notes go?".
 ///
 /// Connecting is a means, not an end. The old pane left the user sitting on the
-/// form they had just submitted, holding a device key, with no route to
+/// form they had just submitted, holding a identity key, with no route to
 /// actually having a space — the two ways to get one (make a new one, or copy
 /// one the server already holds) both lived somewhere else entirely.
 #[test]
@@ -2368,7 +2368,7 @@ fn the_welcome_screen_offers_spaces_once_connected() {
     app.type_into_field("###enkr_welcome_server", &server.url());
     app.click("###enkr_welcome_connect");
     pump_until(&mut [&mut app], "connected", |apps| apps[0].connected());
-    // The first connect mints the device key and offers the recovery phrase;
+    // The first connect mints the identity key and offers the recovery phrase;
     // acknowledge it so it is not sitting over the screen under test.
     if app.frame().try_node("###enkr_recovery_ack").is_some() {
         app.click("###enkr_recovery_ack");
@@ -2714,7 +2714,7 @@ fn a_browser_client_collaborates_with_a_native_one() {
     let mut a = App::new();
     let (mut b, b_key) = browser_client(&server);
 
-    // -- A pushes a space, then invites B by its device key -------------------
+    // -- A pushes a space, then invites B by its identity key -------------------
     a.state
         .notes
         .rename_space(a.state.notes.default_space_id(), "Shared");
@@ -2834,7 +2834,7 @@ fn a_browser_client_collaborates_with_a_native_one() {
 }
 
 /// Launch a headless-browser Enkr client already connected to `server`, and
-/// read its device key out of its own Sync settings — the same string A has to
+/// read its identity key out of its own Sync settings — the same string A has to
 /// be given to invite it, and the only way in without a second machine.
 #[cfg(feature = "cdp")]
 fn browser_client(server: &TestServer) -> (mae::testkit::cdp::CdpDriver, String) {
@@ -2859,7 +2859,7 @@ fn browser_client(server: &TestServer) -> (mae::testkit::cdp::CdpDriver, String)
     );
     let key = key
         .as_str()
-        .expect("the browser client's device key should be on its Sync settings page")
+        .expect("the browser client's identity key should be on its Sync settings page")
         .to_string();
     b.key_press(mae::os::OSKeyCode::KeyEscape);
     (b, key)

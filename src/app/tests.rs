@@ -1166,7 +1166,7 @@ fn the_layout_follows_the_viewport_without_a_rebuild() {
     );
 }
 
-/// On a phone the page lays out at the *device's* width, and pinch-zoom
+/// On a phone the page lays out at the *identity's* width, and pinch-zoom
 /// still works.
 ///
 /// Neither was true: with no `<meta name="viewport">` a mobile browser lays
@@ -1187,7 +1187,7 @@ fn the_web_page_lays_out_at_device_width() {
     assert_eq!(
         driver.debug_eval("window.innerWidth").as_f64(),
         Some(390.0),
-        "the page should lay out at the device's width, not a default desktop one"
+        "the page should lay out at the identity's width, not a default desktop one"
     );
     assert_eq!(
         driver
@@ -1446,8 +1446,8 @@ fn top_bar_offers_the_markdown_toggle_on_native() {
     assert!(snap.try_node("###enkr_markdown_mode").is_some());
 }
 
-/// The device identity must survive a page refresh on wasm32. It *is*
-/// this device's membership in every space it has been admitted to, so
+/// The cryptographic identity must survive a page refresh on wasm32. It *is*
+/// this identity's membership in every space it has been admitted to, so
 /// a regenerated one silently orphans the device from all of them —
 /// which is exactly what happened before `IdentityStore::LocalStorage`
 /// existed (the web build used `IdentityStore::InMemory`, minting a
@@ -1466,12 +1466,12 @@ fn top_bar_offers_the_markdown_toggle_on_native() {
 #[test]
 #[ignore = "needs www/build_test_harness.sh run first, plus a local chromium and python3 on PATH"]
 fn device_identity_survives_a_page_reload() {
-    const READ_KEY: &str = "window.localStorage.getItem('enkr_device_key')";
+    const READ_KEY: &str = "window.localStorage.getItem('enkr_identity_key')";
 
     let mut driver = crate::testkit_support::launch_test_harness();
     assert!(
         driver.debug_eval(READ_KEY).is_null(),
-        "a fresh browser profile should not have a device key yet"
+        "a fresh browser profile should not have an identity key yet"
     );
 
     // The Connect button lives in Settings (the sync window is a
@@ -1481,7 +1481,7 @@ fn device_identity_survives_a_page_reload() {
     let first = driver.debug_eval(READ_KEY);
     let first = first
         .as_str()
-        .expect("connecting should have stored a device key");
+        .expect("connecting should have stored an identity key");
     assert_eq!(first.len(), 128, "64 key bytes, hex encoded");
     assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -2135,7 +2135,7 @@ fn move_to_palette_lists_destinations_across_spaces_by_path() {
 
     // A synced destination says so, because moving there changes the audience.
     let space_row = rows.iter().find(|r| r.title == "Work").unwrap();
-    assert!(space_row.subtitle.contains("this device"));
+    assert!(space_row.subtitle.contains("this installation"));
 }
 
 /// Filtering rebuilds the list, and picking a destination moves the subject.

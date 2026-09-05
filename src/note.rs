@@ -83,7 +83,7 @@ pub struct Space {
 }
 
 /// A folder groups notes inside a space. Identified by a UUID so folders keep
-/// their identity across devices when the space syncs.
+/// their identity across identities when the space syncs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: Uuid,
@@ -969,7 +969,7 @@ impl NoteDatabase {
         bytes: Vec<u8>,
     ) -> String {
         let content_hash = content_hash(&bytes);
-        // Space-scoped dedup: the same image pasted twice — by this device or by
+        // Space-scoped dedup: the same image pasted twice — by this installation or by
         // any member whose index entry we have already adopted — reuses the
         // existing blob instead of storing and uploading a second copy. The
         // caller reads the name back from the id we return, so the new link just
@@ -1507,7 +1507,7 @@ impl NoteDatabase {
 
     /// Create an (empty) local note mirroring a remote sync doc; its content
     /// arrives through `apply_remote_update`. The local id is the doc uuid —
-    /// unique and stable across devices.
+    /// unique and stable across identities.
     pub fn create_note_from_remote(&mut self, space_id: i64, remote_doc: Uuid) -> String {
         let id = remote_doc.to_string();
         if self.contains(&id) {

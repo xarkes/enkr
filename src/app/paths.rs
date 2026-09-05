@@ -1,5 +1,5 @@
 //! Filesystem locations and URL normalization: where the note database, the
-//! device key and the import/export folders live on each platform.
+//! identity key and the import/export folders live on each platform.
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::env;
@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 pub(crate) const DATABASE_FILE: &str = "enkr_notes.sqlite3";
 pub(crate) const DEVICE_KEY_FILE: &str = "enkr_device.key";
-/// `localStorage` key holding the device identity on wasm32 — the browser
+/// `localStorage` key holding the cryptographic identity on wasm32 — the browser
 /// counterpart of `DEVICE_KEY_FILE` (see `sync/identity.rs`).
 #[cfg(target_arch = "wasm32")]
-pub(crate) const DEVICE_KEY_STORAGE_KEY: &str = "enkr_device_key";
+pub(crate) const DEVICE_KEY_STORAGE_KEY: &str = "enkr_identity_key";
 pub(crate) const APP_DIR_NAME: &str = "enkr";
 pub(crate) const IMPORT_DIR: &str = "enkr_import";
 pub(crate) const EXPORT_DIR: &str = "enkr_export";
@@ -19,7 +19,7 @@ pub(crate) fn default_database_path() -> PathBuf {
     platform_config_dir().join(APP_DIR_NAME).join(DATABASE_FILE)
 }
 
-pub(crate) fn default_device_key_path() -> PathBuf {
+pub(crate) fn default_identity_key_path() -> PathBuf {
     platform_config_dir()
         .join(APP_DIR_NAME)
         .join(DEVICE_KEY_FILE)

@@ -27,14 +27,14 @@ use uuid::Uuid;
 use enkr_proto::crypto;
 pub use enkr_proto::crypto::{BlobKey, index_doc_id};
 pub use enkr_proto::membership::MemberRole;
-pub use enkr_proto::wire::{DevicePk, ErrorCode, KexPk};
+pub use enkr_proto::wire::{ErrorCode, IdentityPk, KexPk};
 pub use identity::{IdentityStore, recovery_phrase, restore_from_phrase};
 
 #[derive(Clone, Debug)]
 pub struct SyncConfig {
     /// e.g. `ws://127.0.0.1:9070/ws`
     pub server_url: String,
-    /// Where the device identity lives (the only persistent sync state).
+    /// Where the cryptographic identity lives (the only persistent sync state).
     pub identity: IdentityStore,
     /// The #1 performance knob: how long queued update bytes pool before
     /// encrypt+sign+push of one merged frame.
@@ -95,7 +95,7 @@ pub enum SyncEvent {
         server_version: u16,
         client_version: u16,
     },
-    /// The relay refused this device's credentials at the handshake — a wrong,
+    /// The relay refused this identity's credentials at the handshake — a wrong,
     /// revoked, or (on a relay that demands one) missing account token. Like
     /// [`SyncEvent::Incompatible`] this is **not** retried: the same credential
     /// will be refused every time. Entering a different token reconnects.
@@ -122,14 +122,14 @@ pub enum SyncEvent {
     /// to the UI replica (idempotent, order-independent).
     ///
     /// `caret_author` is set only for a *live* broadcast (an edit happening
-    /// now): the receiver moves that device's remote caret to the edit point
+    /// now): the receiver moves that identity's remote caret to the edit point
     /// the instant it applies, so the caret never lags the text. It is `None`
     /// for backlog catch-up, snapshots and deferred retries, where there is no
     /// live cursor to attribute.
     DocBytes {
         doc_id: Uuid,
         update: Vec<u8>,
-        caret_author: Option<DevicePk>,
+        caret_author: Option<IdentityPk>,
     },
     /// Subscription caught up; the doc is live.
     DocSynced {
@@ -164,7 +164,7 @@ pub enum SyncEvent {
     /// A decrypted, signature-verified awareness payload from another member.
     Ephemeral {
         doc_id: Uuid,
-        author_device: DevicePk,
+        author_identity: IdentityPk,
         payload: Vec<u8>,
     },
     /// Bad signature / failed decrypt / unknown author — dropped frame.
@@ -224,7 +224,7 @@ impl std::error::Error for SyncError {}
 /// signature-verified) membership log. Used to populate the share dialog.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberEntry {
-    pub device_pk: DevicePk,
+    pub identity_pk: IdentityPk,
     pub kex_pk: KexPk,
     pub role: MemberRole,
 }
@@ -236,7 +236,7 @@ pub struct SyncStatus {
     /// Set when the relay rejected us over a wire-version mismatch; no further
     /// connection attempts will be made.
     pub incompatible: Option<(u16, u16)>,
-    /// The relay refused this device's credentials (bad/revoked/missing account
+    /// The relay refused this identity's credentials (bad/revoked/missing account
     /// token). Terminal like `incompatible`; an explicit reconnect clears it.
     pub rejected: bool,
     /// Frames awaiting server Ack.
@@ -271,20 +271,20 @@ pub(crate) enum Cmd {
     },
     AddMember {
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         kex_pk: KexPk,
         role: MemberRole,
         reply: oneshot::Sender<Result<(), SyncError>>,
     },
     RemoveMember {
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         reply: oneshot::Sender<Result<(), SyncError>>,
     },
     /// Change an existing member's role (re-issues a signed `Add` op).
     SetMemberRole {
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         role: MemberRole,
         reply: oneshot::Sender<Result<(), SyncError>>,
     },
@@ -389,7 +389,7 @@ fn install_crypto_provider() {}
 pub struct SyncClient {
     cmd_tx: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<SyncEvent>,
-    device_pk: DevicePk,
+    identity_pk: IdentityPk,
     kex_pk: KexPk,
     /// Behind a `Mutex<Option<_>>` rather than owned outright because the app
     /// holds the client through an `Arc` (the GUI bridge) and still has to be
@@ -399,7 +399,7 @@ pub struct SyncClient {
 }
 
 impl SyncClient {
-    /// Boot the sync engine. Loading/creating the device identity is quick
+    /// Boot the sync engine. Loading/creating the identity is quick
     /// enough (a 64-byte file, or nothing at all for `IdentityStore::
     /// InMemory`) to do directly here rather than reporting back
     /// asynchronously — needed on wasm32 regardless, since there's no way to
@@ -408,7 +408,7 @@ impl SyncClient {
     pub fn spawn(config: SyncConfig) -> Result<Self, SyncError> {
         install_crypto_provider();
         let identity = identity::load_or_create(&config.identity).map_err(SyncError::Other)?;
-        let device_pk = identity.device_pk();
+        let identity_pk = identity.identity_pk();
         let kex_pk = identity.kex_pk();
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -419,14 +419,14 @@ impl SyncClient {
         Ok(Self {
             cmd_tx,
             events,
-            device_pk,
+            identity_pk,
             kex_pk,
             handle: std::sync::Mutex::new(Some(handle)),
         })
     }
 
-    pub fn device_pk(&self) -> DevicePk {
-        self.device_pk
+    pub fn identity_pk(&self) -> IdentityPk {
+        self.identity_pk
     }
 
     pub fn kex_pk(&self) -> KexPk {
@@ -455,7 +455,7 @@ impl SyncClient {
         self.request(|reply| Cmd::CreateSpace { reply }).await
     }
 
-    /// Join a space this device was invited to: fetches the membership log and
+    /// Join a space this installation was invited to: fetches the membership log and
     /// key envelopes, verifies them, and subscribes the index doc.
     pub async fn join_space(&self, space_id: Uuid) -> Result<(), SyncError> {
         self.request(|reply| Cmd::JoinSpace { space_id, reply })
@@ -500,13 +500,13 @@ impl SyncClient {
     pub async fn add_member(
         &self,
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         kex_pk: KexPk,
         role: MemberRole,
     ) -> Result<(), SyncError> {
         self.request(|reply| Cmd::AddMember {
             space_id,
-            device_pk,
+            identity_pk,
             kex_pk,
             role,
             reply,
@@ -519,11 +519,11 @@ impl SyncClient {
     pub async fn remove_member(
         &self,
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
     ) -> Result<(), SyncError> {
         self.request(|reply| Cmd::RemoveMember {
             space_id,
-            device_pk,
+            identity_pk,
             reply,
         })
         .await
@@ -534,12 +534,12 @@ impl SyncClient {
     pub async fn set_member_role(
         &self,
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         role: MemberRole,
     ) -> Result<(), SyncError> {
         self.request(|reply| Cmd::SetMemberRole {
             space_id,
-            device_pk,
+            identity_pk,
             role,
             reply,
         })
@@ -643,7 +643,7 @@ impl SyncClient {
         self.send_cmd(Cmd::DeleteSpace { space_id })
     }
 
-    /// Ask the server which spaces this device is a member of (ids only;
+    /// Ask the server which spaces this installation is a member of (ids only;
     /// names live encrypted in each space's index doc).
     pub async fn list_spaces(&self) -> Result<Vec<Uuid>, SyncError> {
         self.request(|reply| Cmd::ListSpaces { reply }).await

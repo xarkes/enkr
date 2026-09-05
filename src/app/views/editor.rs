@@ -436,7 +436,7 @@ pub(crate) fn content_panel(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) 
         .notes
         .note(&active_note_id)
         .and_then(|note| note.remote_doc());
-    // Read-only when the active note lives in a synced space where this device
+    // Read-only when the active note lives in a synced space where this installation
     // is only a Reader. Local-only spaces and not-yet-known roles stay editable
     // so the editor never flashes read-only before membership loads.
     let read_only = state

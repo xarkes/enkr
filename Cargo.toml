@@ -5,7 +5,7 @@ edition = "2024"
 autotests = false
 
 [dependencies]
-enkr-proto = { git = "https://github.com/xarkes/enkr-proto.git" }
+enkr-proto = { path = "../enkr-proto" }
 yrs = "0.26.0"
 # std::time::Instant/SystemTime unconditionally panic on wasm32-unknown-
 # unknown ("time not implemented on this platform" — no wall-clock/monotonic
@@ -110,7 +110,7 @@ web-sys = { version = "0.3", features = [
   # picker (see app.rs).
   "File",
   "FileList",
-  # `window.localStorage`, where the device identity lives on wasm32 — see
+  # `window.localStorage`, where the identity identity lives on wasm32 — see
   # `sync/identity.rs` for why that (and not IndexedDB, which the note
   # database uses) is the right home for a 64-byte key.
   "Storage",

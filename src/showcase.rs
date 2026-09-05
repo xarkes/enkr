@@ -7,7 +7,7 @@
 //! - client1 opens in a visible window on a brand-new local database
 //! - client1 imports a small markdown repo as a new Space (via the folder picker)
 //! - client1 connects and pushes the Space to the server
-//! - client1 shares the Space by pasting client2's device key
+//! - client1 shares the Space by pasting client2's identity key
 //! - client2 (a headless app running in this same process, invisible) fetches
 //!   the Space and starts typing into a note — its edits and presence caret
 //!   appear live in client1's window
@@ -256,7 +256,7 @@ impl Drop for ShowcaseServer {
 /// "barriers" are just flags one script publishes and the other waits on.
 #[derive(Default)]
 struct Shared {
-    /// client2's device key, published once its sync engine is up; client1
+    /// client2's identity key, published once its sync engine is up; client1
     /// "pastes" it into the share dialog.
     client2_key: Option<String>,
     /// client1 finished the invite flow.
@@ -498,9 +498,9 @@ impl Script {
                 cond: space_pushed,
             },
             Pause(0.8),
-            // -- Share it with client2 (paste its device key) --------------
+            // -- Share it with client2 (paste its identity key) -------------
             WaitApp {
-                what: "client2 published its device key",
+                what: "client2 published its identity key",
                 cond: |_, shared| shared.client2_key.is_some(),
             },
             RightClick(Label("###enkr_space_switcher".into())),
@@ -586,7 +586,7 @@ impl Script {
         Self::new("client1", steps, true)
     }
 
-    /// The invisible client: connects, publishes its device key, pulls the
+    /// The invisible client: connects, publishes its identity key, pulls the
     /// shared space once invited, and types into the README.
     fn client2(url: &str) -> Self {
         use Selector::*;
@@ -624,7 +624,7 @@ impl Script {
                 shared.client2_key = state
                     .sync
                     .as_ref()
-                    .map(|sync| sync.device_key().to_string());
+                    .map(|sync| sync.identity_key().to_string());
             }),
             // -- Pull the shared space once invited -------------------------
             WaitApp {

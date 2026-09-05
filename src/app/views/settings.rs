@@ -199,7 +199,7 @@ pub(crate) fn settings_view(
     root
 }
 
-/// Where the data lives, who this device is, and what build this is — the
+/// Where the data lives, which identity this installation uses, and what build this is — the
 /// questions a first-run user actually has, and the ones you need again when
 /// something goes wrong.
 fn section_general(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) {
@@ -213,11 +213,11 @@ fn section_general(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) {
         };
     }
 
-    settings_heading(ui, "This device");
+    settings_heading(ui, "Identity");
     let fingerprint = state
         .sync
         .as_ref()
-        .map(|sync| sync.device_key()[..16].to_string())
+        .map(|sync| sync.identity_key()[..16].to_string())
         .unwrap_or_else(|| "not created until you connect".to_string());
     info_row(ui, pal, "Identity", &fingerprint);
     recovery_phrase_controls(ui, state, &theme);
@@ -256,7 +256,7 @@ fn info_row(ui: &mut IMUI, pal: &Colors, label: &str, value: &str) {
             .width(ui, UISize::Pixels(96.0))
             .text_color(ui, pal.text_muted)
             .font_size(ui, theme.size_text - 1.0);
-        // Selectable so a device key or path can actually be copied out.
+        // Selectable so an identity key or path can actually be copied out.
         ui.label(value)
             .width(ui, UISize::Fill)
             .text_color(ui, pal.text)
@@ -275,7 +275,7 @@ fn section_editor(ui: &mut IMUI, state: &mut EnkrState) {
     }
 }
 
-/// Everything about talking to a server: which one, as whom, this device's
+/// Everything about talking to a server: which one, as whom, this identity's
 /// invite key, and the spaces the server is holding for you. Previously split
 /// between the Settings window and a separate Synchronization window, which is
 /// why neither ever told the whole story.
@@ -326,7 +326,7 @@ fn section_sync(ui: &mut IMUI, state: &mut EnkrState) {
             (has_token, names)
         })
         .collect();
-    // What the *connected* server says it holds — including spaces this device
+    // What the *connected* server says it holds — including spaces this installation
     // has never mirrored. Only obtainable for the one server we have a live
     // connection to, which is why every other row can show local spaces only.
     let remote_rows = if net_connected {
@@ -481,7 +481,7 @@ fn section_sync(ui: &mut IMUI, state: &mut EnkrState) {
                         && enkr_button(
                             ui,
                             &format!("Sync###enkr_fetch_{id_full}"),
-                            Some("Copy this space onto this device"),
+                            Some("Copy this space onto this installation"),
                             BtnVariant::Secondary,
                         )
                         .height(ui, UISize::Pixels(24.0))
@@ -490,7 +490,7 @@ fn section_sync(ui: &mut IMUI, state: &mut EnkrState) {
                         fetch_space = Some(remote.space_id);
                     }
                     // Delete is about the space on the *server*, so it belongs
-                    // to whoever owns it — whether or not this device holds a
+                    // to whoever owns it — whether or not this installation holds a
                     // local copy. Hiding it unless mirrored left an owner
                     // unable to delete a space they had unsynced.
                     if remote.is_owner
@@ -533,7 +533,7 @@ fn section_sync(ui: &mut IMUI, state: &mut EnkrState) {
                 .align(ui, MainAxisAlign::Start, CrossAxisAlign::Center);
         } else {
             // Only one connection runs at a time, so for every other server all
-            // that can honestly be shown is what this device already holds.
+            // that can honestly be shown is what this installation already holds.
             for name in space_names {
                 ui.label(&format!("\u{2713}  {name}"))
                     .width(ui, UISize::ParentPct(1.0))
@@ -710,14 +710,14 @@ fn section_sync(ui: &mut IMUI, state: &mut EnkrState) {
         return;
     };
 
-    settings_heading(ui, "This device's key");
+    settings_heading(ui, "This identity's key");
     ui.label("Share this with someone to be invited to their space.")
         .width(ui, UISize::ParentPct(1.0))
         .text_color(ui, theme.text_muted)
         .font_size(ui, theme.size_text - 1.0);
-    let mut key = sync.device_key().to_string();
+    let mut key = sync.identity_key().to_string();
     let key_field = ui.textarea_with_options(
-        "###enkr_device_key",
+        "###enkr_identity_key",
         &mut key,
         TextAreaOptions::new()
             .wrap_x(true)
@@ -799,17 +799,17 @@ fn section_advanced(ui: &mut IMUI) {
     }
 }
 
-/// Backup and restore for the device identity.
+/// Backup and restore for the cryptographic identity.
 ///
 /// Lives under "This device" rather than with the sync server settings: the
-/// phrase is not per-server, it is the device. Only meaningful once a key
+/// phrase is not per-server, it is the identity. Only meaningful once a key
 /// exists, which is on first connect — before that there is nothing to back up
 /// and saying so is clearer than a button that errors.
 fn recovery_phrase_controls(ui: &mut IMUI, state: &mut EnkrState, theme: &UITheme) {
     let has_identity = state.identity_store.is_some();
     ui.label(if has_identity {
-        "Twelve words that can rebuild this device's identity. The only way to read \
-         your synced notes if you lose this machine."
+        "Twelve words that restore this identity on another installation. Every \
+         installation using it shares the same permissions and authorship."
     } else {
         "Once you connect to a sync server, a recovery phrase is created here."
     })
@@ -823,7 +823,7 @@ fn recovery_phrase_controls(ui: &mut IMUI, state: &mut EnkrState, theme: &UIThem
         if enkr_button(
             ui,
             "Show recovery phrase\u{2026}###enkr_settings_show_phrase",
-            Some("Reveal the twelve words for this device"),
+            Some("Reveal the twelve words for this identity"),
             BtnVariant::Secondary,
         )
         .width(ui, UISize::Fill)
@@ -834,7 +834,7 @@ fn recovery_phrase_controls(ui: &mut IMUI, state: &mut EnkrState, theme: &UIThem
         if enkr_button(
             ui,
             "Restore from a phrase\u{2026}###enkr_settings_restore_phrase",
-            Some("Rebuild this device's identity from twelve words"),
+            Some("Restore this identity from twelve words"),
             BtnVariant::Secondary,
         )
         .width(ui, UISize::Fill)

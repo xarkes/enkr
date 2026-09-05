@@ -677,7 +677,7 @@ pub(crate) fn blob_item(
 }
 
 /// Bottom sidebar toolbar with secondary actions.
-/// The sidebar's status pill: connection state, this device's nickname, and
+/// The sidebar's status pill: connection state, this identity's nickname, and
 /// the single settings entry point.
 ///
 /// Replaces a strip of five unlabelled glyphs (new space / import / export /

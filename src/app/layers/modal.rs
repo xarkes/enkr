@@ -206,8 +206,8 @@ pub(crate) fn role_label(role: MemberRole) -> &'static str {
     }
 }
 
-/// Invite dialog: paste the other device's key (shown in *its* sync window),
-/// plus the list of devices already invited (manageable by owners).
+/// Invite dialog: paste the other identity's key (shown in *its* sync window),
+/// plus the list of identities already invited (manageable by owners).
 pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
     // Taken out for the frame to keep `state.sync` independently borrowable.
     let Some(mut dialog) = state.share_dialog.take() else {
@@ -240,7 +240,7 @@ pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
         width,
         height,
         |ui| {
-            ui.label("Paste the invitee's device key:")
+            ui.label("Paste the invitee's identity key:")
                 .width(ui, UISize::ParentPct(1.0))
                 .text_color(ui, theme.text_muted);
             ui.line_edit("###enkr_share_key", &mut dialog.input, false)
@@ -296,7 +296,7 @@ pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
                 if enkr_button(
                     ui,
                     "Invite###enkr_share_invite",
-                    Some("Add this device"),
+                    Some("Add this identity"),
                     BtnVariant::Primary,
                 )
                 .clicked()
@@ -335,17 +335,17 @@ pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
                 .text_color(ui, theme.text)
                 .font_size(ui, theme.size_text + 1.0);
             if members.is_empty() {
-                ui.label("No invited devices yet.")
+                ui.label("No invited identities yet.")
                     .width(ui, UISize::ParentPct(1.0))
                     .text_color(ui, theme.text_muted)
                     .font_size(ui, theme.size_text - 1.0);
             }
             for member in &members {
-                let short = member.short_id();
+                let short = member.short_identity_id();
                 let row = ui.row(|ui| {
                     let mut name = short.clone();
                     if member.is_self {
-                        name.push_str("  (this device)");
+                        name.push_str("  (this identity)");
                     }
                     ui.label(&name)
                         .width(ui, UISize::Fill)
@@ -376,7 +376,7 @@ pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
                             {
                                 sync.change_member_role(
                                     dialog.remote_space,
-                                    member.device_pk,
+                                    member.identity_pk,
                                     role,
                                 );
                             }
@@ -384,14 +384,14 @@ pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
                         if enkr_button(
                             ui,
                             &format!("Remove###enkr_member_remove_{short}"),
-                            Some("Revoke this device's access"),
+                            Some("Revoke this identity's access"),
                             BtnVariant::Danger,
                         )
                         .height(ui, UISize::Pixels(24.0))
                         .clicked()
                             && let Some(sync) = state.sync.as_mut()
                         {
-                            sync.uninvite(dialog.remote_space, member.device_pk);
+                            sync.uninvite(dialog.remote_space, member.identity_pk);
                         }
                     } else {
                         ui.label(role_label(member.role))
@@ -413,7 +413,7 @@ pub(crate) fn render_share_dialog(ui: &mut IMUI, state: &mut EnkrState) {
 
 /// The recovery-phrase surfaces: reveal, and restore.
 ///
-/// The phrase is the only thing that can ever read this device's synced notes —
+/// The phrase is the only thing that can ever read this identity's synced notes —
 /// the relay holds ciphertext and nothing else — so the copy here is blunt on
 /// purpose. There is no reset link and no support route; if it is lost, the
 /// content is gone.
@@ -505,9 +505,9 @@ pub(crate) fn render_recovery_dialog(ui: &mut IMUI, state: &mut EnkrState) {
                 300.0,
                 |ui| {
                     ui.label(
-                        "Type the twelve words from another install of this app. This \
-                         device will take on that identity, and takes effect after a \
-                         restart.",
+                        "Type the twelve words from another installation of this app. This \
+                         installation will use that identity; installations using it share \
+                         permissions and authorship. The change takes effect after a restart.",
                     )
                     .width(ui, UISize::ParentPct(1.0))
                     .text_color(ui, theme.text_muted)
@@ -515,8 +515,8 @@ pub(crate) fn render_recovery_dialog(ui: &mut IMUI, state: &mut EnkrState) {
                     ui.line_edit("###enkr_recovery_input", &mut typed, false)
                         .width(ui, UISize::ParentPct(1.0));
                     ui.label(
-                        "Replacing this device's identity removes it from every space it \
-                         was invited to. Those invitations cannot be recovered.",
+                        "Replacing this installation's identity removes it from every space \
+                         its old identity was invited to. Those invitations cannot be recovered.",
                     )
                     .width(ui, UISize::ParentPct(1.0))
                     .text_color(ui, Color::new("#e0a052"))

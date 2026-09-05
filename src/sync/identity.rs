@@ -1,21 +1,24 @@
-//! Device identity persistence — the *only* thing the sync layer keeps on
+//! Cryptographic identity persistence — the *only* thing the sync layer keeps on
 //! disk. Everything else (space keys, membership logs, outbox, seq state) is
 //! in-memory and re-fetched/re-derived from the server; content durability is
 //! the note database's job (see the `needs_push` flag in `note.rs`).
 //!
-//! Format: the 16-byte [`DeviceSeed`] both keys are derived from, written once
+//! Format: the 16-byte [`IdentitySeed`] both keys are derived from, written once
 //! on first run — a flat file natively, hex in `localStorage` on wasm32. Shaped
 //! so the production replacement is an OS keychain entry, not a database.
 //!
 //! The seed rather than the keys, because 16 bytes is small enough to be a
 //! 12-word BIP39 phrase and therefore small enough for a person to write down.
+//! The phrase restores the same identity, so it may be used on another
+//! installation. Those installations intentionally share the identity's
+//! permissions and authorship; it is not a way to create a second member.
 //! That is the only recovery path there is: the relay holds nothing but
 //! ciphertext, so a device whose seed is gone leaves its owner with synced
 //! content nobody can ever decrypt. See `enkr/TODO.md` under Shipping.
 
 use std::path::PathBuf;
 
-use enkr_proto::crypto::{DeviceIdentity, DeviceSeed};
+use enkr_proto::crypto::{Identity, IdentitySeed};
 
 #[derive(Clone, Debug)]
 pub enum IdentityStore {
@@ -38,25 +41,25 @@ pub enum IdentityStore {
     LocalStorage(String),
 }
 
-pub(crate) fn load_or_create(store: &IdentityStore) -> Result<DeviceIdentity, String> {
+pub(crate) fn load_or_create(store: &IdentityStore) -> Result<Identity, String> {
     let path = match store {
-        IdentityStore::InMemory => return Ok(DeviceIdentity::generate()),
+        IdentityStore::InMemory => return Ok(Identity::generate()),
         #[cfg(target_arch = "wasm32")]
         IdentityStore::LocalStorage(key) => return load_or_create_web(key),
         IdentityStore::Path(path) => path,
     };
 
     match std::fs::read(path) {
-        Ok(bytes) => Ok(DeviceIdentity::from_seed(&decode_seed(&bytes, path)?)),
+        Ok(bytes) => Ok(Identity::from_seed(&decode_seed(&bytes, path)?)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let seed = DeviceSeed::generate();
+            let seed = IdentitySeed::generate();
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            write_private(path, &seed.0).map_err(|e| format!("write device key: {e}"))?;
-            Ok(DeviceIdentity::from_seed(&seed))
+            write_private(path, &seed.0).map_err(|e| format!("write identity key: {e}"))?;
+            Ok(Identity::from_seed(&seed))
         }
-        Err(err) => Err(format!("read device key {}: {err}", path.display())),
+        Err(err) => Err(format!("read identity key {}: {err}", path.display())),
     }
 }
 
@@ -67,20 +70,20 @@ pub(crate) fn load_or_create(store: &IdentityStore) -> Result<DeviceIdentity, St
 /// point: silently minting a new identity would orphan the device from every
 /// space it was admitted to, which is far worse than an error telling the owner
 /// what happened.
-fn decode_seed(bytes: &[u8], path: &std::path::Path) -> Result<DeviceSeed, String> {
+fn decode_seed(bytes: &[u8], path: &std::path::Path) -> Result<IdentitySeed, String> {
     match <[u8; 16]>::try_from(bytes) {
-        Ok(seed) => Ok(DeviceSeed(seed)),
+        Ok(seed) => Ok(IdentitySeed(seed)),
         Err(_) if bytes.len() == 64 => Err(format!(
             "{} predates recovery phrases (64-byte key, no seed behind it). \
              Delete it to start a new identity — that device will need re-inviting \
              to any shared space.",
             path.display()
         )),
-        Err(_) => Err(format!("corrupt device key file: {}", path.display())),
+        Err(_) => Err(format!("corrupt identity key file: {}", path.display())),
     }
 }
 
-/// This device's recovery phrase, read back from wherever the seed is stored.
+/// This identity's recovery phrase, read back from wherever the seed is stored.
 ///
 /// Read on demand rather than kept in memory: the phrase is the whole identity,
 /// and there is no reason for it to sit in the process between the rare moments
@@ -89,10 +92,11 @@ pub fn recovery_phrase(store: &IdentityStore) -> Result<String, String> {
     Ok(seed_to_phrase(&read_seed(store)?))
 }
 
-/// Rebuild this device's identity from a phrase.
+/// Restore this identity from a phrase. The restored identity may also exist
+/// on other installations; importing it does not create a distinct member.
 ///
 /// `overwrite` guards the destructive case: replacing an existing identity
-/// orphans this device from every space the old key was admitted to, and no
+/// orphans this installation from every space the old key was admitted to, and no
 /// warning after the fact can undo it. A fresh install passes `false` and gets
 /// an error if something is already there.
 pub fn restore_from_phrase(
@@ -102,31 +106,32 @@ pub fn restore_from_phrase(
 ) -> Result<(), String> {
     let seed = phrase_to_seed(phrase)?;
     if !overwrite && read_seed(store).is_ok() {
-        return Err("this device already has an identity; restoring would replace it".into());
+        return Err("this installation already has an identity; restoring would replace it".into());
     }
     write_seed(store, &seed)
 }
 
-fn read_seed(store: &IdentityStore) -> Result<DeviceSeed, String> {
+fn read_seed(store: &IdentityStore) -> Result<IdentitySeed, String> {
     match store {
         IdentityStore::InMemory => Err("this session has no stored identity".into()),
         IdentityStore::Path(path) => {
             let bytes = std::fs::read(path)
-                .map_err(|err| format!("read device key {}: {err}", path.display()))?;
+                .map_err(|err| format!("read identity key {}: {err}", path.display()))?;
             decode_seed(&bytes, path)
         }
         #[cfg(target_arch = "wasm32")]
         IdentityStore::LocalStorage(key) => {
             let stored = web_storage()?
                 .get_item(key)
-                .map_err(|e| format!("read device key from localStorage[{key}]: {e:?}"))?
-                .ok_or_else(|| format!("no device key in localStorage[{key}]"))?;
-            decode_hex(&stored).ok_or_else(|| format!("corrupt device key in localStorage[{key}]"))
+                .map_err(|e| format!("read identity key from localStorage[{key}]: {e:?}"))?
+                .ok_or_else(|| format!("no identity key in localStorage[{key}]"))?;
+            decode_hex(&stored)
+                .ok_or_else(|| format!("corrupt identity key in localStorage[{key}]"))
         }
     }
 }
 
-fn write_seed(store: &IdentityStore, seed: &DeviceSeed) -> Result<(), String> {
+fn write_seed(store: &IdentityStore, seed: &IdentitySeed) -> Result<(), String> {
     match store {
         IdentityStore::InMemory => Err("this session has no stored identity".into()),
         IdentityStore::Path(path) => {
@@ -136,30 +141,30 @@ fn write_seed(store: &IdentityStore, seed: &DeviceSeed) -> Result<(), String> {
             // `write_private` refuses to clobber (create_new), which is what
             // makes the `overwrite` decision explicit rather than incidental.
             let _ = std::fs::remove_file(path);
-            write_private(path, &seed.0).map_err(|e| format!("write device key: {e}"))
+            write_private(path, &seed.0).map_err(|e| format!("write identity key: {e}"))
         }
         #[cfg(target_arch = "wasm32")]
         IdentityStore::LocalStorage(key) => web_storage()?
             .set_item(key, &encode_hex(&seed.0))
-            .map_err(|e| format!("write device key to localStorage[{key}]: {e:?}")),
+            .map_err(|e| format!("write identity key to localStorage[{key}]: {e:?}")),
     }
 }
 
-/// The device's recovery phrase: its seed as 12 BIP39 words.
+/// The identity's recovery phrase: its seed as 12 BIP39 words.
 ///
 /// BIP39 rather than hex because it carries a checksum. A phrase is transcribed
 /// by hand and typed back months later, and a silent single-character typo means
 /// permanent, unrecoverable loss — which is the exact failure this exists to
 /// prevent. The words also read as "keep this safe" in a way 32 hex characters
 /// do not.
-pub fn seed_to_phrase(seed: &DeviceSeed) -> String {
+pub fn seed_to_phrase(seed: &IdentitySeed) -> String {
     bip39::Mnemonic::from_entropy(&seed.0)
         .expect("16 bytes is valid BIP39 entropy")
         .to_string()
 }
 
 /// Parse a recovery phrase back into a seed, rejecting a bad checksum.
-pub fn phrase_to_seed(phrase: &str) -> Result<DeviceSeed, String> {
+pub fn phrase_to_seed(phrase: &str) -> Result<IdentitySeed, String> {
     let mnemonic = bip39::Mnemonic::parse_normalized(phrase.trim())
         .map_err(|err| format!("not a valid recovery phrase: {err}"))?;
     let (entropy, len) = mnemonic.to_entropy_array();
@@ -168,7 +173,7 @@ pub fn phrase_to_seed(phrase: &str) -> Result<DeviceSeed, String> {
             "recovery phrase should be 12 words, this one carries {len} bytes"
         ));
     }
-    Ok(DeviceSeed(entropy[..16].try_into().expect("checked len")))
+    Ok(IdentitySeed(entropy[..16].try_into().expect("checked len")))
 }
 
 /// `localStorage` counterpart of the file path branch above, with the same
@@ -177,7 +182,7 @@ pub fn phrase_to_seed(phrase: &str) -> Result<DeviceSeed, String> {
 /// identity if something is there but unreadable.
 ///
 /// That last part is the whole point of this module — a regenerated
-/// identity silently orphans this device from every space it had been
+/// identity silently orphans this installation from every space it had been
 /// admitted to, which is far worse than a visible error. For the same
 /// reason an unavailable `localStorage` (private-mode restrictions, storage
 /// disabled) is an error and not a quiet fall back to
@@ -189,7 +194,7 @@ pub fn phrase_to_seed(phrase: &str) -> Result<DeviceSeed, String> {
 /// hold arbitrary byte sequences. 32 characters for a seed written once is
 /// not worth a base64 dependency.
 #[cfg(target_arch = "wasm32")]
-fn load_or_create_web(key: &str) -> Result<DeviceIdentity, String> {
+fn load_or_create_web(key: &str) -> Result<Identity, String> {
     let storage = web_storage()?;
 
     match storage.get_item(key) {
@@ -202,19 +207,19 @@ fn load_or_create_web(key: &str) -> Result<DeviceIdentity, String> {
                          will need re-inviting to any shared space."
                     )
                 } else {
-                    format!("corrupt device key in localStorage[{key}]")
+                    format!("corrupt identity key in localStorage[{key}]")
                 }
             })?;
-            Ok(DeviceIdentity::from_seed(&seed))
+            Ok(Identity::from_seed(&seed))
         }
         Ok(None) => {
-            let seed = DeviceSeed::generate();
+            let seed = IdentitySeed::generate();
             storage
                 .set_item(key, &encode_hex(&seed.0))
-                .map_err(|e| format!("write device key to localStorage[{key}]: {e:?}"))?;
-            Ok(DeviceIdentity::from_seed(&seed))
+                .map_err(|e| format!("write identity key to localStorage[{key}]: {e:?}"))?;
+            Ok(Identity::from_seed(&seed))
         }
-        Err(e) => Err(format!("read device key from localStorage[{key}]: {e:?}")),
+        Err(e) => Err(format!("read identity key from localStorage[{key}]: {e:?}")),
     }
 }
 
@@ -237,7 +242,7 @@ fn encode_hex(bytes: &[u8; 16]) -> String {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn decode_hex(text: &str) -> Option<DeviceSeed> {
+fn decode_hex(text: &str) -> Option<IdentitySeed> {
     let text = text.as_bytes();
     if text.len() != 32 {
         return None;
@@ -248,7 +253,7 @@ fn decode_hex(text: &str) -> Option<DeviceSeed> {
         let lo = (pair[1] as char).to_digit(16)?;
         *byte = (hi * 16 + lo) as u8;
     }
-    Some(DeviceSeed(out))
+    Some(IdentitySeed(out))
 }
 
 #[cfg(unix)]
@@ -274,7 +279,7 @@ mod tests {
 
     #[test]
     fn a_phrase_rebuilds_the_same_identity() {
-        let seed = DeviceSeed::generate();
+        let seed = IdentitySeed::generate();
         let phrase = seed_to_phrase(&seed);
         assert_eq!(phrase.split_whitespace().count(), 12, "{phrase}");
 
@@ -282,12 +287,12 @@ mod tests {
         assert_eq!(restored.0, seed.0);
         // The point of the whole feature: same words, same device.
         assert_eq!(
-            DeviceIdentity::from_seed(&seed).device_pk(),
-            DeviceIdentity::from_seed(&restored).device_pk()
+            Identity::from_seed(&seed).identity_pk(),
+            Identity::from_seed(&restored).identity_pk()
         );
         assert_eq!(
-            DeviceIdentity::from_seed(&seed).kex_pk(),
-            DeviceIdentity::from_seed(&restored).kex_pk()
+            Identity::from_seed(&seed).kex_pk(),
+            Identity::from_seed(&restored).kex_pk()
         );
     }
 
@@ -299,7 +304,7 @@ mod tests {
         // generated seed made this test fail roughly 5% of runs. Pinning the
         // vector keeps it deciding whether the checksum is *checked at all*,
         // which is what it is actually for.
-        let phrase = seed_to_phrase(&DeviceSeed([0x24; 16]));
+        let phrase = seed_to_phrase(&IdentitySeed([0x24; 16]));
         let mut words: Vec<&str> = phrase.split_whitespace().collect();
         // Swap one word for another real word: without BIP39's checksum this
         // would parse into a *different* valid seed, silently handing the user
@@ -320,7 +325,7 @@ mod tests {
     fn signing_and_kex_keys_are_independent() {
         // Derived from one seed, but a compromise of one must not reveal the
         // other — separate HKDF info strings, not a split of the same bytes.
-        let identity = DeviceIdentity::from_seed(&DeviceSeed::generate());
+        let identity = Identity::from_seed(&IdentitySeed::generate());
         let (signing, kex) = identity.to_bytes();
         assert_ne!(signing, kex);
     }
@@ -351,17 +356,17 @@ mod tests {
         // A different install, given only the words.
         restore_from_phrase(&IdentityStore::Path(fresh.clone()), &phrase, false).expect("restore");
         let restored = load_or_create(&IdentityStore::Path(fresh.clone())).expect("load restored");
-        assert_eq!(first.device_pk(), restored.device_pk());
+        assert_eq!(first.identity_pk(), restored.identity_pk());
         assert_eq!(first.kex_pk(), restored.kex_pk());
 
         // Restoring over an existing identity is refused unless asked for: it
-        // orphans this device from every space the old key was admitted to.
-        let other = seed_to_phrase(&DeviceSeed::generate());
+        // orphans this installation from every space the old key was admitted to.
+        let other = seed_to_phrase(&IdentitySeed::generate());
         assert!(restore_from_phrase(&IdentityStore::Path(fresh.clone()), &other, false).is_err());
         restore_from_phrase(&IdentityStore::Path(fresh.clone()), &other, true)
             .expect("explicit overwrite");
         let replaced = load_or_create(&IdentityStore::Path(fresh.clone())).expect("load replaced");
-        assert_ne!(first.device_pk(), replaced.device_pk());
+        assert_ne!(first.identity_pk(), replaced.identity_pk());
 
         // A bad phrase must not leave the identity half-written.
         let before = std::fs::read(&fresh).unwrap();
@@ -382,7 +387,7 @@ mod tests {
 
         let first = load_or_create(&store).expect("create identity");
         let second = load_or_create(&store).expect("reload identity");
-        assert_eq!(first.device_pk(), second.device_pk());
+        assert_eq!(first.identity_pk(), second.identity_pk());
         assert_eq!(first.kex_pk(), second.kex_pk());
         // The seed, not the derived keys — 16 bytes is what a 12-word phrase carries.
         assert_eq!(std::fs::read(&path).unwrap().len(), 16);
@@ -399,7 +404,7 @@ mod tests {
     fn in_memory_is_fresh_each_time() {
         let a = load_or_create(&IdentityStore::InMemory).unwrap();
         let b = load_or_create(&IdentityStore::InMemory).unwrap();
-        assert_ne!(a.device_pk(), b.device_pk());
+        assert_ne!(a.identity_pk(), b.identity_pk());
     }
 
     /// The wasm32 store keeps the identity as hex (`localStorage` holds
@@ -441,11 +446,11 @@ mod tests {
     /// branches stay interchangeable.
     #[test]
     fn stored_seed_round_trips_through_hex() {
-        let seed = DeviceSeed::generate();
+        let seed = IdentitySeed::generate();
         let restored = decode_hex(&encode_hex(&seed.0)).expect("round-trip");
-        let identity = DeviceIdentity::from_seed(&seed);
-        let reloaded = DeviceIdentity::from_seed(&restored);
-        assert_eq!(identity.device_pk(), reloaded.device_pk());
+        let identity = Identity::from_seed(&seed);
+        let reloaded = Identity::from_seed(&restored);
+        assert_eq!(identity.identity_pk(), reloaded.identity_pk());
         assert_eq!(identity.kex_pk(), reloaded.kex_pk());
     }
 }

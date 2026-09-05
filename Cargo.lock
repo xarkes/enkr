@@ -506,7 +506,6 @@ dependencies = [
 [[package]]
 name = "enkr-proto"
 version = "0.0.1"
-source = "git+https://github.com/xarkes/enkr-proto.git#b0cc5882c29bb70310a583a1c08e81afb1d8b144"
 dependencies = [
  "chacha20poly1305",
  "crypto_box",

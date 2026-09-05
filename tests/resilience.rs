@@ -333,7 +333,7 @@ async fn content_from_an_author_the_log_says_cannot_write_is_refused() {
     // Alice is promoted (op 3, the newest). Her own client only picks that up
     // on a fresh join — nothing pushes a role change to a connected member.
     owner
-        .set_member_role(space, alice.device_pk(), MemberRole::Writer)
+        .set_member_role(space, alice.identity_pk(), MemberRole::Writer)
         .await
         .expect("promote");
     alice.shutdown().await;
@@ -409,7 +409,7 @@ async fn a_stale_membership_log_cannot_roll_a_client_back() {
     // The owner revokes the member; the relay then hides that Remove and the
     // epoch bump that came with it.
     owner
-        .remove_member(space, member.device_pk())
+        .remove_member(space, member.identity_pk())
         .await
         .expect("remove member");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -425,7 +425,7 @@ async fn a_stale_membership_log_cannot_roll_a_client_back() {
     let members = owner.list_members(space).await.expect("list members");
     let still_active = members
         .iter()
-        .any(|entry| entry.device_pk == member.device_pk());
+        .any(|entry| entry.identity_pk == member.identity_pk());
     assert!(
         !still_active,
         "a suppressed Remove op resurrected a revoked member — the client accepted a \
@@ -596,7 +596,7 @@ async fn health_reports_live_state() {
         "a connected client is not reflected: {busy}"
     );
 
-    // Nothing sensitive: no space ids, device keys or user data.
+    // Nothing sensitive: no space ids, identity keys or user data.
     for leak in ["space", "device", "note"] {
         assert!(
             !busy.contains(leak),
@@ -631,7 +631,7 @@ async fn http_get(url: &str) -> String {
 /// losing the database would have cost.
 ///
 /// Clients clear `needs_push` once acked, so they will **not** re-upload after
-/// a relay is restored from nothing: existing devices keep working from their
+/// a relay is restored from nothing: existing identities keep working from their
 /// local copies, but a *new* device gets an empty space and any content whose
 /// only holder is offline is gone. That is the loss this test reproduces and
 /// then repairs — the restore is verified by a device that has never seen the
@@ -816,12 +816,12 @@ async fn a_flooding_client_is_cut_off_and_others_keep_working() {
 async fn a_device_cannot_open_unbounded_connections() {
     const CAP: usize = 3;
     let config = ServerConfig {
-        max_connections_per_device: CAP,
+        max_connections_per_identity: CAP,
         ..ServerConfig::default()
     };
     let server = TestServer::start_strict(config).await;
 
-    // The same device key each time, so these all count against one slot pool.
+    // The same identity key each time, so these all count against one slot pool.
     let key = std::env::temp_dir().join(format!("enkr_cap_key_{}.key", Uuid::new_v4()));
     let mut clients = Vec::new();
     for _ in 0..CAP {
@@ -837,10 +837,10 @@ async fn a_device_cannot_open_unbounded_connections() {
     assert_eq!(
         server.live_connections() as usize,
         CAP,
-        "the relay accepted more connections than the per-device cap"
+        "the relay accepted more connections than the per-identity cap"
     );
 
-    // A *different* device is unaffected: the cap is per device, not global.
+    // A *different* device is unaffected: the cap is per identity, not global.
     let other = server.client();
     wait_connected(&other).await;
     assert_eq!(server.live_connections() as usize, CAP + 1);

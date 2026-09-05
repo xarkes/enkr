@@ -340,7 +340,7 @@ async fn a_guest_syncs_and_bills_the_space_owner() {
     owner.insert_text(doc, 0, "hello ").await.expect("insert");
     converge(&[&owner], doc).await;
 
-    // No token at all — on a relay that requires one for its own devices.
+    // No token at all — on a relay that requires one for its own identities.
     let guest = server.client();
     invite_and_join(&owner, &guest, space).await;
     guest.open_doc(space, doc).await.expect("open doc");

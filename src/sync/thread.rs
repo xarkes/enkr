@@ -24,7 +24,7 @@
 
 use tokio::sync::{broadcast, mpsc};
 
-use enkr_proto::crypto::DeviceIdentity;
+use enkr_proto::crypto::Identity;
 
 use super::engine::Engine;
 use super::{Cmd, SyncConfig, SyncEvent};
@@ -63,7 +63,7 @@ impl EngineHandle {
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn spawn_engine(
     config: SyncConfig,
-    identity: DeviceIdentity,
+    identity: Identity,
     cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     events: broadcast::Sender<SyncEvent>,
 ) -> Result<EngineHandle, String> {
@@ -107,7 +107,7 @@ impl EngineHandle {
 #[cfg(target_arch = "wasm32")]
 pub(super) fn spawn_engine(
     config: SyncConfig,
-    identity: DeviceIdentity,
+    identity: Identity,
     cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     events: broadcast::Sender<SyncEvent>,
 ) -> Result<EngineHandle, String> {

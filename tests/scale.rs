@@ -21,7 +21,7 @@ mod harness;
 use std::time::{Duration, Instant};
 
 use enkr::sync::{MemberRole, SyncEvent};
-use enkr_proto::crypto::DeviceIdentity;
+use enkr_proto::crypto::Identity;
 use enkr_syncd::ServerConfig;
 use uuid::Uuid;
 
@@ -685,14 +685,14 @@ async fn membership_log_growth() {
     wait_connected(&owner).await;
     let space = owner.create_space().await.expect("create space");
 
-    // Throwaway identities: the log only needs distinct device keys, and
+    // Throwaway identities: the log only needs distinct identity keys, and
     // spawning `ops` real clients would dwarf what this test measures.
     for _ in 0..ops {
-        let device = DeviceIdentity::generate();
+        let device = Identity::generate();
         owner
             .add_member(
                 space,
-                device.device_pk(),
+                device.identity_pk(),
                 device.kex_pk(),
                 MemberRole::Writer,
             )
@@ -756,18 +756,18 @@ async fn repeated_membership_changes_all_land() {
     let space = owner.create_space().await.expect("create space");
 
     for cycle in 0..cycles {
-        let device = DeviceIdentity::generate();
+        let device = Identity::generate();
         owner
             .add_member(
                 space,
-                device.device_pk(),
+                device.identity_pk(),
                 device.kex_pk(),
                 MemberRole::Writer,
             )
             .await
             .unwrap_or_else(|err| panic!("add on cycle {cycle}: {err}"));
         owner
-            .remove_member(space, device.device_pk())
+            .remove_member(space, device.identity_pk())
             .await
             .unwrap_or_else(|err| panic!("remove on cycle {cycle}: {err}"));
     }
@@ -790,7 +790,7 @@ async fn repeated_membership_changes_all_land() {
 }
 
 /// Key envelopes are kept for every historical epoch, for every device, and
-/// returned whole by `envelopes_for_device` (`sqlite.rs:264-281`).
+/// returned whole by `envelopes_for_identity` (`sqlite.rs:264-281`).
 #[tokio::test]
 #[ignore = "scale budget"]
 async fn envelope_growth_under_epoch_churn() {
@@ -809,11 +809,11 @@ async fn envelope_growth_under_epoch_churn() {
     let space = owner.create_space().await.expect("create space");
 
     for _ in 0..cycles {
-        let device = DeviceIdentity::generate();
+        let device = Identity::generate();
         owner
             .add_member(
                 space,
-                device.device_pk(),
+                device.identity_pk(),
                 device.kex_pk(),
                 MemberRole::Writer,
             )
@@ -821,7 +821,7 @@ async fn envelope_growth_under_epoch_churn() {
             .expect("add member");
         // Each removal bumps the epoch and seals a fresh key to everyone left.
         owner
-            .remove_member(space, device.device_pk())
+            .remove_member(space, device.identity_pk())
             .await
             .expect("remove member");
         // Paced: `repeated_membership_changes_all_land` covers the op_seq race

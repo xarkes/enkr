@@ -1,4 +1,4 @@
-//! The sync state machine. One instance per device, running on the dedicated
+//! The sync state machine. One instance per identity, running on the dedicated
 //! sync thread inside a single-threaded tokio runtime.
 //!
 //! The engine is **doc-less**: it never holds a Yrs document. It is a
@@ -16,7 +16,7 @@
 //!               but not *what* — it emits SnapshotNeeded and seals whatever
 //!               full state the UI provides back.
 //!
-//! Nothing is persisted here except the device identity (see `identity.rs`):
+//! Nothing is persisted here except the cryptographic identity (see `identity.rs`):
 //! keys/membership re-fetch from the server on join, sequence state rebuilds
 //! from snapshot+backlog, and unacknowledged local content is re-shipped by
 //! the UI's `needs_push` flag. Unknown epoch → FetchEnvelopes, retry. Bad
@@ -35,10 +35,10 @@ use uuid::Uuid;
 use web_time::Instant;
 
 use enkr_proto::PROTOCOL_VERSION;
-use enkr_proto::crypto::{self, DeviceIdentity, SpaceKey};
+use enkr_proto::crypto::{self, Identity, SpaceKey};
 use enkr_proto::membership::{self, MemberRole, MembershipOp, MembershipOpKind, MembershipState};
 use enkr_proto::wire::{
-    self, ClientMsg, DevicePk, EnvelopeUpload, KexPk, ServerMsg, SnapshotFrame, SubscribeEntry,
+    self, ClientMsg, EnvelopeUpload, IdentityPk, KexPk, ServerMsg, SnapshotFrame, SubscribeEntry,
     UpdateFrame,
 };
 
@@ -88,14 +88,14 @@ enum HandshakeFailure {
     },
 }
 
-/// A deterministic point in `[0, window]`, mixed from this device's key and a
+/// A deterministic point in `[0, window]`, mixed from this identity's key and a
 /// per-attempt salt. Keeping it deterministic avoids pulling a random source
-/// into the engine; mixing the device key is what makes two clients pick
+/// into the engine; mixing the identity key is what makes two clients pick
 /// *different* delays, which is the whole point of jitter.
-fn jitter(window: Duration, device_pk: &DevicePk, salt: u64) -> Duration {
+fn jitter(window: Duration, identity_pk: &IdentityPk, salt: u64) -> Duration {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write(device_pk);
+    hasher.write(identity_pk);
     hasher.write_u64(salt);
     let micros = window.as_micros() as u64;
     if micros == 0 {
@@ -173,7 +173,7 @@ struct JoinProgress {
 
 pub(super) struct Engine {
     config: SyncConfig,
-    identity: DeviceIdentity,
+    identity: Identity,
     events: broadcast::Sender<SyncEvent>,
     docs: HashMap<Uuid, DocState>,
     spaces: HashMap<Uuid, SpaceState>,
@@ -201,7 +201,7 @@ pub(super) struct Engine {
     /// side is upgraded, and doing it silently is what left the UI stuck on
     /// "Connecting…".
     incompatible: Option<(u16, u16)>,
-    /// Set once the relay has refused this device's credentials. Stops further
+    /// Set once the relay has refused this identity's credentials. Stops further
     /// attempts for the same reason `incompatible` does: nothing about a
     /// rejected token changes by asking again.
     rejected: bool,
@@ -266,7 +266,7 @@ enum Wake {
 impl Engine {
     pub(super) fn new(
         config: SyncConfig,
-        identity: DeviceIdentity,
+        identity: Identity,
         events: broadcast::Sender<SyncEvent>,
     ) -> Self {
         let backoff = config.reconnect_min;
@@ -427,7 +427,7 @@ impl Engine {
             }
             Err(HandshakeFailure::Rejected { code, context }) => {
                 log::error!(
-                    "{} refused this device ({code:?}): {context}",
+                    "{} refused this identity ({code:?}): {context}",
                     self.config.server_url
                 );
                 self.rejected = true;
@@ -458,7 +458,7 @@ impl Engine {
         send_ws(
             &mut ws,
             &ClientMsg::Hello {
-                device_pk: self.identity.device_pk(),
+                identity_pk: self.identity.identity_pk(),
                 kex_pk: self.identity.kex_pk(),
                 protocol_version: PROTOCOL_VERSION,
             },
@@ -636,7 +636,7 @@ impl Engine {
     /// otherwise retries in lockstep, so the load spike lands exactly when the
     /// relay is least able to absorb it.
     fn schedule_reconnect(&mut self) {
-        let jittered = jitter(self.backoff, &self.identity.device_pk(), self.next_tag);
+        let jittered = jitter(self.backoff, &self.identity.identity_pk(), self.next_tag);
         self.next_reconnect = Instant::now() + jittered;
         self.backoff = (self.backoff * 2).min(self.config.reconnect_max);
     }
@@ -684,7 +684,7 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        if !space.membership.can_write(&self.identity.device_pk()) {
+        if !space.membership.can_write(&self.identity.identity_pk()) {
             if let Some(doc) = self.docs.get_mut(&doc_id) {
                 doc.pending.updates.clear();
                 doc.pending.bytes = 0;
@@ -846,27 +846,27 @@ impl Engine {
             }
             Cmd::AddMember {
                 space_id,
-                device_pk,
+                identity_pk,
                 kex_pk,
                 role,
                 reply,
             } => {
-                let _ = reply.send(self.add_member(space_id, device_pk, kex_pk, role).await);
+                let _ = reply.send(self.add_member(space_id, identity_pk, kex_pk, role).await);
             }
             Cmd::RemoveMember {
                 space_id,
-                device_pk,
+                identity_pk,
                 reply,
             } => {
-                let _ = reply.send(self.remove_member(space_id, device_pk).await);
+                let _ = reply.send(self.remove_member(space_id, identity_pk).await);
             }
             Cmd::SetMemberRole {
                 space_id,
-                device_pk,
+                identity_pk,
                 role,
                 reply,
             } => {
-                let _ = reply.send(self.set_member_role(space_id, device_pk, role).await);
+                let _ = reply.send(self.set_member_role(space_id, identity_pk, role).await);
             }
             Cmd::ListMembers { space_id, reply } => {
                 let _ = reply.send(self.list_members(space_id));
@@ -942,7 +942,7 @@ impl Engine {
                 }
             }
             Cmd::ForgetSpace { space_id } => {
-                // Local-only teardown: the device stays a member server-side.
+                // Local-only teardown: the identity stays a member server-side.
                 // Dropping the keys + doc subscriptions makes a later JoinSpace
                 // re-fetch envelopes/membership and re-subscribe every doc from
                 // seq 0, so content is pulled fresh into the new local mirror.
@@ -1004,7 +1004,7 @@ impl Engine {
         let signed = membership::sign_op(&self.identity, &op)
             .map_err(|e| SyncError::Other(e.to_string()))?;
         let envelope = EnvelopeUpload {
-            device_pk: self.identity.device_pk(),
+            identity_pk: self.identity.identity_pk(),
             epoch: 0,
             sealed_key: crypto::seal_space_key(&self.identity.kex_pk(), &key),
         };
@@ -1042,7 +1042,7 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return Err(SyncError::UnknownSpace);
         };
-        if !space.membership.can_write(&self.identity.device_pk()) {
+        if !space.membership.can_write(&self.identity.identity_pk()) {
             return Err(SyncError::Other("permission denied".into()));
         }
         if !self.connected() {
@@ -1105,17 +1105,19 @@ impl Engine {
     async fn add_member(
         &mut self,
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         kex_pk: KexPk,
         role: MemberRole,
     ) -> Result<(), SyncError> {
         if !self.connected() {
             return Err(SyncError::Disconnected);
         }
-        // Re-adding ourselves (membership is keyed on `device_pk`) would
+        // Re-adding ourselves (membership is keyed on `identity_pk`) would
         // overwrite our own role and could leave us stuck without admin rights.
-        if device_pk == self.identity.device_pk() {
-            return Err(SyncError::Other("cannot invite this device itself".into()));
+        if identity_pk == self.identity.identity_pk() {
+            return Err(SyncError::Other(
+                "cannot invite this identity itself".into(),
+            ));
         }
         let Some(space) = self.spaces.get_mut(&space_id) else {
             return Err(SyncError::UnknownSpace);
@@ -1125,7 +1127,7 @@ impl Engine {
             .keys
             .iter()
             .map(|(epoch, key)| EnvelopeUpload {
-                device_pk,
+                identity_pk,
                 epoch: *epoch,
                 sealed_key: crypto::seal_space_key(&kex_pk, key),
             })
@@ -1134,7 +1136,7 @@ impl Engine {
             space_id,
             op_seq: space.membership.next_op_seq,
             kind: MembershipOpKind::Add {
-                device_pk,
+                identity_pk,
                 kex_pk,
                 role,
             },
@@ -1161,7 +1163,7 @@ impl Engine {
     async fn remove_member(
         &mut self,
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
     ) -> Result<(), SyncError> {
         if !self.connected() {
             return Err(SyncError::Disconnected);
@@ -1184,7 +1186,7 @@ impl Engine {
             space_id,
             op_seq: space.membership.next_op_seq,
             kind: MembershipOpKind::Remove {
-                device_pk,
+                identity_pk,
                 new_epoch,
             },
         };
@@ -1199,7 +1201,7 @@ impl Engine {
             .membership
             .active_members()
             .map(|(member_pk, info)| EnvelopeUpload {
-                device_pk: *member_pk,
+                identity_pk: *member_pk,
                 epoch: new_epoch,
                 sealed_key: crypto::seal_space_key(&info.kex_pk, &new_key),
             })
@@ -1226,7 +1228,7 @@ impl Engine {
     async fn set_member_role(
         &mut self,
         space_id: Uuid,
-        device_pk: DevicePk,
+        identity_pk: IdentityPk,
         role: MemberRole,
     ) -> Result<(), SyncError> {
         let kex_pk = {
@@ -1234,12 +1236,12 @@ impl Engine {
             space
                 .membership
                 .members
-                .get(&device_pk)
+                .get(&identity_pk)
                 .filter(|m| !m.removed)
                 .map(|m| m.kex_pk)
                 .ok_or_else(|| SyncError::Other("device is not an active member".into()))?
         };
-        self.add_member(space_id, device_pk, kex_pk, role).await
+        self.add_member(space_id, identity_pk, kex_pk, role).await
     }
 
     /// Active members of a space, read from the locally-verified membership log.
@@ -1248,8 +1250,8 @@ impl Engine {
         Ok(space
             .membership
             .active_members()
-            .map(|(device_pk, info)| MemberEntry {
-                device_pk: *device_pk,
+            .map(|(identity_pk, info)| MemberEntry {
+                identity_pk: *identity_pk,
                 kex_pk: info.kex_pk,
                 role: info.role,
             })
@@ -1534,11 +1536,11 @@ impl Engine {
             return;
         };
         let space_id = doc.space_id;
-        let own = frame.author_device == self.identity.device_pk();
+        let own = frame.author_identity == self.identity.identity_pk();
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        if !own && !space.membership.can_author_content(&frame.author_device) {
+        if !own && !space.membership.can_author_content(&frame.author_identity) {
             // Not necessarily hostile, and usually not: neither adding a member
             // nor promoting one bumps the epoch, so an already-connected member
             // has no reason to have refetched the log since either happened —
@@ -1568,7 +1570,7 @@ impl Engine {
             Ok(plaintext) => {
                 self.note_seq(doc_id, seq);
                 // A device never moves its own remote caret from an echo.
-                let caret_author = (live && !own).then_some(frame.author_device);
+                let caret_author = (live && !own).then_some(frame.author_identity);
                 self.emit(SyncEvent::DocBytes {
                     doc_id,
                     update: plaintext,
@@ -1595,7 +1597,7 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        if !space.membership.can_write(&self.identity.device_pk()) {
+        if !space.membership.can_write(&self.identity.identity_pk()) {
             return;
         }
         let Some((epoch, key)) = space.latest_key() else {
@@ -1626,7 +1628,7 @@ impl Engine {
             self.warn_security(format!("doc {doc_id}: undecodable ephemeral"));
             return;
         };
-        if !space.membership.was_ever_member(&frame.author_device) {
+        if !space.membership.was_ever_member(&frame.author_identity) {
             self.warn_security(format!("doc {doc_id}: ephemeral from unknown device"));
             return;
         }
@@ -1636,7 +1638,7 @@ impl Engine {
         match crypto::open_ephemeral(&frame, key, &space_id, &doc_id) {
             Ok(plaintext) => self.emit(SyncEvent::Ephemeral {
                 doc_id,
-                author_device: frame.author_device,
+                author_identity: frame.author_identity,
                 payload: plaintext,
             }),
             Err(err) => self.warn_security(format!("doc {doc_id}: ephemeral: {err}")),
@@ -1799,7 +1801,7 @@ impl Engine {
         // write rights must not author one even when asked. The relay refuses
         // it too, but a reader that shipped one would just be told off on every
         // compaction round.
-        if !space.membership.can_write(&self.identity.device_pk()) {
+        if !space.membership.can_write(&self.identity.identity_pk()) {
             return;
         }
         let Some((epoch, key)) = space.latest_key() else {
@@ -1837,13 +1839,13 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        let own = frame.author_device == self.identity.device_pk();
+        let own = frame.author_identity == self.identity.identity_pk();
         // A snapshot replaces the whole document, so the author must be one the
         // log says could write it. Membership alone is not enough: a reader can
         // seal and sign a valid snapshot with the space key it legitimately
         // holds, and accepting that hands every reader an edit channel wider
         // than the one `flush_doc` denies them.
-        if !own && !space.membership.can_author_content(&frame.author_device) {
+        if !own && !space.membership.can_author_content(&frame.author_identity) {
             self.warn_security(format!(
                 "doc {doc_id}: snapshot from a device with no write rights"
             ));
@@ -1943,9 +1945,9 @@ impl Engine {
         let Some(space) = self.spaces.get(&space_id) else {
             return;
         };
-        let own = frame.author_device == self.identity.device_pk();
-        if !own && !space.membership.can_author_content(&frame.author_device) {
-            // The refreshed log still doesn't grant this device write rights —
+        let own = frame.author_identity == self.identity.identity_pk();
+        if !own && !space.membership.can_author_content(&frame.author_identity) {
+            // The refreshed log still doesn't grant this installation write rights —
             // it is unknown, or it is a reader. Keep the frame (a later Add or
             // promotion may yet explain it) but say so: after a refetch, this
             // is what a forged frame looks like.
@@ -2049,7 +2051,7 @@ mod tests {
             frame: UpdateFrame {
                 doc_id: expected,
                 epoch: 0,
-                author_device: [0; 32],
+                author_identity: [0; 32],
                 nonce: [0; 24],
                 ciphertext: Vec::new(),
                 sig: Vec::new(),

@@ -109,7 +109,7 @@ async fn removed_writer_frame_is_rejected_by_peers() {
     converge(&[&owner, &removed, &peer], doc).await;
 
     owner
-        .remove_member(space, removed.device_pk())
+        .remove_member(space, removed.identity_pk())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -143,13 +143,13 @@ async fn accountless_connections_do_not_register_devices() {
     let client = server.client();
     wait_connected(&client).await;
 
-    let devices: i64 = server
+    let identities: i64 = server
         .raw_db()
-        .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM identities", [], |row| row.get(0))
         .unwrap();
     assert_eq!(
-        devices, 0,
-        "an accountless handshake grew the devices table"
+        identities, 0,
+        "an accountless handshake grew the identities table"
     );
 }
 
@@ -194,7 +194,7 @@ async fn blob_survives_epoch_rotation() {
     let evictee = server.client();
     wait_connected(&evictee).await;
     invite_and_join(&a, &evictee, space).await;
-    a.remove_member(space, evictee.device_pk()).await.unwrap();
+    a.remove_member(space, evictee.identity_pk()).await.unwrap();
 
     // `remove_member` returns once the op is sent, not once it is persisted.
     let deadline = tokio::time::Instant::now() + CONVERGE_TIMEOUT;
@@ -406,7 +406,7 @@ async fn offline_edits_survive_server_restart_and_converge() {
 /// sequenced and relayed without error or interpretation.
 #[tokio::test]
 async fn dumb_server_stores_and_relays_random_bytes() {
-    use enkr_proto::crypto::DeviceIdentity;
+    use enkr_proto::crypto::Identity;
     use enkr_proto::membership::{MembershipOp, MembershipOpKind, sign_op};
     use enkr_proto::wire::*;
     use enkr_proto::{PROTOCOL_VERSION, crypto, wire};
@@ -417,7 +417,7 @@ async fn dumb_server_stores_and_relays_random_bytes() {
 
     async fn raw_conn(
         url: &str,
-        dev: &DeviceIdentity,
+        dev: &Identity,
     ) -> impl futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
     + futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
     + Unpin {
@@ -425,7 +425,7 @@ async fn dumb_server_stores_and_relays_random_bytes() {
             .await
             .expect("connect");
         let hello = ClientMsg::Hello {
-            device_pk: dev.device_pk(),
+            identity_pk: dev.identity_pk(),
             kex_pk: dev.kex_pk(),
             protocol_version: PROTOCOL_VERSION,
         };
@@ -469,7 +469,7 @@ async fn dumb_server_stores_and_relays_random_bytes() {
         }
     }
 
-    let dev = DeviceIdentity::generate();
+    let dev = Identity::generate();
     let url = server.url();
     let mut ws = raw_conn(&url, &dev).await;
 
@@ -507,7 +507,7 @@ async fn dumb_server_stores_and_relays_random_bytes() {
     let frame = UpdateFrame {
         doc_id: doc,
         epoch: 7,
-        author_device: dev.device_pk(),
+        author_identity: dev.identity_pk(),
         nonce: [0xAB; 24],
         ciphertext: noise.clone(),
         sig: vec![0xCD; 64], // garbage signature: the server must not care
@@ -536,14 +536,14 @@ async fn dumb_server_stores_and_relays_random_bytes() {
         "expected Ack for noise frame, got {ack:?}"
     );
 
-    // A second device subscribing gets the identical noise back.
-    let dev2 = DeviceIdentity::generate();
+    // A second identity subscribing gets the identical noise back.
+    let dev2 = Identity::generate();
     let url2 = server.url();
     let op2 = MembershipOp {
         space_id: space,
         op_seq: 1,
         kind: MembershipOpKind::Add {
-            device_pk: dev2.device_pk(),
+            identity_pk: dev2.identity_pk(),
             kex_pk: dev2.kex_pk(),
             role: enkr_proto::membership::MemberRole::Writer,
         },
@@ -628,7 +628,7 @@ async fn server_storage_contains_no_plaintext() {
 /// surface a security warning, and stay converged.
 #[tokio::test]
 async fn tampered_frames_rejected_by_clients() {
-    use enkr_proto::crypto::DeviceIdentity;
+    use enkr_proto::crypto::Identity;
     use enkr_proto::wire::*;
     use enkr_proto::{PROTOCOL_VERSION, crypto, wire};
     use futures_util::{SinkExt, StreamExt};
@@ -641,10 +641,10 @@ async fn tampered_frames_rejected_by_clients() {
 
     // Mallory is a *member* (worst case): she pushes a well-formed frame with
     // garbage ciphertext under the current epoch.
-    let mallory = DeviceIdentity::generate();
+    let mallory = Identity::generate();
     a.add_member(
         space,
-        mallory.device_pk(),
+        mallory.identity_pk(),
         mallory.kex_pk(),
         MemberRole::Writer,
     )
@@ -656,7 +656,7 @@ async fn tampered_frames_rejected_by_clients() {
         .unwrap();
     ws.send(Message::Binary(
         wire::encode(&ClientMsg::Hello {
-            device_pk: mallory.device_pk(),
+            identity_pk: mallory.identity_pk(),
             kex_pk: mallory.kex_pk(),
             protocol_version: PROTOCOL_VERSION,
         })
@@ -697,7 +697,7 @@ async fn tampered_frames_rejected_by_clients() {
         UpdateFrame {
             doc_id: doc,
             epoch: 0,
-            author_device: mallory.device_pk(),
+            author_identity: mallory.identity_pk(),
             nonce: [0x11; 24],
             ciphertext: vec![0x42; 64],
             sig: mallory.sign(&sig_bytes).to_vec(),
@@ -790,7 +790,7 @@ async fn history_survives_envelope_collection() {
     let evictee = server.client();
     wait_connected(&evictee).await;
     invite_and_join(&a, &evictee, space).await;
-    a.remove_member(space, evictee.device_pk()).await.unwrap();
+    a.remove_member(space, evictee.identity_pk()).await.unwrap();
     for i in 0..10 {
         a.insert_text(doc, 0, format!("after-{i};")).await.unwrap();
         a.flush().await.unwrap();
@@ -874,13 +874,13 @@ async fn cannot_invite_own_device() {
     wait_connected(&owner).await;
 
     let space = owner.create_space().await.unwrap();
-    // Re-adding our own device (membership is keyed on device_pk) must be
+    // Re-adding our own device (membership is keyed on identity_pk) must be
     // rejected, even with a tweaked kex_pk — otherwise we'd overwrite our own
     // role and could lock ourselves out.
     let mut kex = owner.kex_pk();
     kex[31] ^= 0x01;
     let err = owner
-        .add_member(space, owner.device_pk(), kex, MemberRole::Writer)
+        .add_member(space, owner.identity_pk(), kex, MemberRole::Writer)
         .await
         .expect_err("owner invited itself");
     assert!(
@@ -891,7 +891,7 @@ async fn cannot_invite_own_device() {
     // Membership is unchanged: still just the owner.
     let members = owner.list_members(space).await.unwrap();
     assert_eq!(members.len(), 1);
-    assert_eq!(members[0].device_pk, owner.device_pk());
+    assert_eq!(members[0].identity_pk, owner.identity_pk());
 }
 
 #[tokio::test]
@@ -909,7 +909,7 @@ async fn removed_member_rejected_and_cannot_decrypt_post_rotation() {
     // Remove c → epoch rotation. Wait until the EpochBump actually reaches b
     // (a fixed sleep flakes under heavy parallel test load).
     let mut b_events = b.events();
-    a.remove_member(space, c.device_pk()).await.unwrap();
+    a.remove_member(space, c.identity_pk()).await.unwrap();
     let bump_deadline = tokio::time::Instant::now() + CONVERGE_TIMEOUT;
     loop {
         match tokio::time::timeout_at(bump_deadline, b_events.recv()).await {
@@ -966,28 +966,28 @@ async fn owner_lists_members_and_manages_roles() {
     invite_and_join_as(&owner, &member, space, MemberRole::Writer).await;
     member.open_doc(space, doc).await.unwrap();
 
-    // The owner sees both devices with their roles.
+    // The owner sees both identities with their roles.
     let role_of =
-        |members: &[MemberEntry], pk| members.iter().find(|m| m.device_pk == pk).map(|m| m.role);
+        |members: &[MemberEntry], pk| members.iter().find(|m| m.identity_pk == pk).map(|m| m.role);
     let members = owner.list_members(space).await.unwrap();
     assert_eq!(members.len(), 2);
     assert_eq!(
-        role_of(&members, owner.device_pk()),
+        role_of(&members, owner.identity_pk()),
         Some(MemberRole::Owner)
     );
     assert_eq!(
-        role_of(&members, member.device_pk()),
+        role_of(&members, member.identity_pk()),
         Some(MemberRole::Writer)
     );
 
     // Demote the writer to reader: it loses write access.
     owner
-        .set_member_role(space, member.device_pk(), MemberRole::Reader)
+        .set_member_role(space, member.identity_pk(), MemberRole::Reader)
         .await
         .unwrap();
     let members = owner.list_members(space).await.unwrap();
     assert_eq!(
-        role_of(&members, member.device_pk()),
+        role_of(&members, member.identity_pk()),
         Some(MemberRole::Reader)
     );
     // Wait for the server's rejection rather than sleeping a fixed 200ms and
@@ -1022,12 +1022,12 @@ async fn owner_lists_members_and_manages_roles() {
 
     // Uninvite the member: it drops out of the listing.
     owner
-        .remove_member(space, member.device_pk())
+        .remove_member(space, member.identity_pk())
         .await
         .unwrap();
     let members = owner.list_members(space).await.unwrap();
     assert_eq!(members.len(), 1);
-    assert_eq!(role_of(&members, member.device_pk()), None);
+    assert_eq!(role_of(&members, member.identity_pk()), None);
 }
 
 #[tokio::test]
@@ -1194,11 +1194,11 @@ async fn readers_cannot_rewrite_a_doc_through_a_snapshot() {
     owner.flush().await.unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    let reader_pk = reader.device_pk().to_vec();
+    let reader_pk = reader.identity_pk().to_vec();
     let authored: i64 = server
         .raw_db()
         .query_row(
-            "SELECT COUNT(*) FROM snapshots WHERE author_device = ?1",
+            "SELECT COUNT(*) FROM snapshots WHERE author_identity = ?1",
             [&reader_pk],
             |r| r.get(0),
         )
@@ -1284,11 +1284,11 @@ async fn a_demoted_writers_existing_snapshot_is_still_accepted() {
     }
     let text = converge(&[&owner, &member], doc).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let member_pk = member.device_pk().to_vec();
+    let member_pk = member.identity_pk().to_vec();
     let authored: i64 = server
         .raw_db()
         .query_row(
-            "SELECT COUNT(*) FROM snapshots WHERE author_device = ?1",
+            "SELECT COUNT(*) FROM snapshots WHERE author_identity = ?1",
             [&member_pk],
             |r| r.get(0),
         )
@@ -1300,7 +1300,7 @@ async fn a_demoted_writers_existing_snapshot_is_still_accepted() {
 
     // Now demote it. The snapshot it already wrote must stay readable.
     owner
-        .set_member_role(space, member.device_pk(), MemberRole::Reader)
+        .set_member_role(space, member.identity_pk(), MemberRole::Reader)
         .await
         .unwrap();
     let joiner = server.client();

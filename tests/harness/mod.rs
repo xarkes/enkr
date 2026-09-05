@@ -129,8 +129,8 @@ impl TestClient {
         self.observers.lock().unwrap().insert(doc_id, observer);
     }
 
-    pub fn device_pk(&self) -> enkr::sync::DevicePk {
-        self.client.device_pk()
+    pub fn identity_pk(&self) -> enkr::sync::IdentityPk {
+        self.client.identity_pk()
     }
 
     pub fn kex_pk(&self) -> enkr::sync::KexPk {
@@ -197,28 +197,28 @@ impl TestClient {
     pub async fn add_member(
         &self,
         space: Uuid,
-        device_pk: enkr::sync::DevicePk,
+        identity_pk: enkr::sync::IdentityPk,
         kex_pk: enkr::sync::KexPk,
         role: MemberRole,
     ) -> Result<(), SyncError> {
-        self.client.add_member(space, device_pk, kex_pk, role).await
+        self.client.add_member(space, identity_pk, kex_pk, role).await
     }
 
     pub async fn remove_member(
         &self,
         space: Uuid,
-        device_pk: enkr::sync::DevicePk,
+        identity_pk: enkr::sync::IdentityPk,
     ) -> Result<(), SyncError> {
-        self.client.remove_member(space, device_pk).await
+        self.client.remove_member(space, identity_pk).await
     }
 
     pub async fn set_member_role(
         &self,
         space: Uuid,
-        device_pk: enkr::sync::DevicePk,
+        identity_pk: enkr::sync::IdentityPk,
         role: MemberRole,
     ) -> Result<(), SyncError> {
-        self.client.set_member_role(space, device_pk, role).await
+        self.client.set_member_role(space, identity_pk, role).await
     }
 
     pub async fn list_members(&self, space: Uuid) -> Result<Vec<MemberEntry>, SyncError> {
@@ -363,7 +363,7 @@ impl TestServer {
     fn permissive(mut config: ServerConfig) -> ServerConfig {
         config.messages_per_second = 1_000_000.0;
         config.message_burst = 1_000_000.0;
-        config.max_connections_per_device = 1024;
+        config.max_connections_per_identity = 1024;
         config
     }
 
@@ -499,7 +499,7 @@ impl TestServer {
 
     /// Same, but with a persistent identity, so the client can be dropped and
     /// recreated as the *same device* — which is what a reconnect actually is.
-    /// `InMemory` mints a new device key each time, and a new device is not a
+    /// `InMemory` mints a new identity key each time, and a new device is not a
     /// member of anything.
     pub fn client_with_token_at(&self, token: &str, key_path: PathBuf) -> TestClient {
         self.client_with_token_as(token, IdentityStore::Path(key_path))
@@ -625,7 +625,7 @@ impl TestServer {
 
     /// A client whose identity persists in `key_path`, so it can be dropped and
     /// recreated as the *same device* — which is what a real install is.
-    /// `IdentityStore::InMemory` mints a new device key per client, so a
+    /// `IdentityStore::InMemory` mints a new identity key per client, so a
     /// recreated one would have lost every membership it had.
     pub fn client_with_identity(&self, key_path: PathBuf) -> TestClient {
         let mut config = SyncConfig::new(self.url(), IdentityStore::Path(key_path));
@@ -716,7 +716,7 @@ pub async fn invite_and_join_as(
     role: MemberRole,
 ) {
     inviter
-        .add_member(space, invitee.device_pk(), invitee.kex_pk(), role)
+        .add_member(space, invitee.identity_pk(), invitee.kex_pk(), role)
         .await
         .expect("add member");
     let deadline = tokio::time::Instant::now() + CONVERGE_TIMEOUT;

@@ -37,7 +37,7 @@ use enkr_proto::crypto::BlobKey;
 use enkr_proto::wire::{AccountInfo, ErrorCode, ImageMime};
 
 use super::{
-    DevicePk, KexPk, MemberEntry, MemberRole, SyncClient, SyncConfig, SyncError, SyncEvent,
+    IdentityPk, KexPk, MemberEntry, MemberRole, SyncClient, SyncConfig, SyncError, SyncEvent,
     index_doc_id,
 };
 
@@ -109,7 +109,7 @@ pub enum SyncIndicator {
 /// place even while either side keeps editing between pings.
 #[derive(Clone, Debug)]
 pub struct Presence {
-    pub device: DevicePk,
+    pub identity: IdentityPk,
     pub nickname: String,
     /// The peer's caret position.
     pub caret: Option<yrs::StickyIndex>,
@@ -119,32 +119,38 @@ pub struct Presence {
 }
 
 impl Presence {
-    /// Stable per-device palette slot for presence colors.
+    /// Stable per-identity palette slot for presence colors.
     pub fn color_slot(&self) -> usize {
-        self.device.iter().fold(0usize, |acc, b| acc + *b as usize) % 6
+        self.identity
+            .iter()
+            .fold(0usize, |acc, b| acc + *b as usize)
+            % 6
     }
 }
 
 /// One member of a shared space, as shown in the share dialog.
 #[derive(Clone, Debug)]
 pub struct MemberView {
-    pub device_pk: DevicePk,
+    pub identity_pk: IdentityPk,
     pub role: MemberRole,
-    /// True for this device — its row carries no management controls.
+    /// True for this identity — its row carries no management controls.
     pub is_self: bool,
 }
 
 impl MemberView {
-    /// Short, human-readable device fingerprint (first 4 bytes, hex).
-    pub fn short_id(&self) -> String {
-        short_device_id(&self.device_pk)
+    /// Short, human-readable identity fingerprint (first 4 bytes, hex).
+    pub fn short_identity_id(&self) -> String {
+        short_identity_id(&self.identity_pk)
     }
 }
 
-/// Short, human-readable device fingerprint (first 4 bytes, hex). Used as a
+/// Short, human-readable identity fingerprint (first 4 bytes, hex). Used as a
 /// presence label fallback when a member hasn't set a nickname.
-fn short_device_id(device_pk: &DevicePk) -> String {
-    device_pk[..4].iter().map(|b| format!("{b:02x}")).collect()
+fn short_identity_id(identity_pk: &IdentityPk) -> String {
+    identity_pk[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Lowercase hex of a 32-byte content hash, for the index `blob_meta` value.
@@ -216,7 +222,7 @@ struct IndexReplica {
     live: bool,
     /// Forwards locally-originated index writes to the engine.
     _observer: yrs::Subscription,
-    /// True once this device may author the space's `name` in the index —
+    /// True once this installation may author the space's `name` in the index —
     /// because it pushed the space, or because it has read a name from the
     /// index at least once.
     ///
@@ -323,7 +329,7 @@ pub struct AppSync {
     /// `(server, client)` wire versions when the relay turned us away over a
     /// mismatch. While set, the engine is not attempting to connect.
     incompatible: Option<(u16, u16)>,
-    /// The relay refused this device's account token, or requires one we did
+    /// The relay refused this identity's account token, or requires one we did
     /// not present. Terminal until the user supplies a different token.
     rejected: bool,
     /// At least one connection attempt has failed since the last success.
@@ -343,7 +349,7 @@ pub struct AppSync {
     /// optimistic push result it invalidates — the two travel by different
     /// paths — and binding a refused space would leave it looking synced.
     rejected_spaces: HashSet<Uuid>,
-    device_key: String,
+    identity_key: String,
     nickname: String,
     /// The sync server URL this engine is bound to; only spaces bound to it
     /// participate in sync.
@@ -420,9 +426,9 @@ pub struct AppSync {
     /// is live. Without this a locally-deleted image stays advertised in the
     /// index doc and a restart re-adopts + re-downloads it.
     pending_blob_removals: HashMap<Uuid, Vec<Uuid>>,
-    presence: HashMap<Uuid, HashMap<DevicePk, Presence>>,
+    presence: HashMap<Uuid, HashMap<IdentityPk, Presence>>,
     presence_sent: HashMap<Uuid, (Instant, (Option<usize>, Option<usize>))>,
-    /// The doc this device is currently announcing presence on (the focused
+    /// The doc this installation is currently announcing presence on (the focused
     /// note's doc, when synced). Changing it sends a leave on the old doc and
     /// an immediate ping on the new one. `None` = focused on a note that isn't
     /// synced here, so we're present nowhere.
@@ -496,7 +502,7 @@ impl AppSync {
         // the active server can't push a server-A space onto server B.
         let active_server = config.server_url.clone();
         let client = std::sync::Arc::new(SyncClient::spawn(config)?);
-        let device_key = encode_device_key(&client.device_pk(), &client.kex_pk());
+        let identity_key = encode_identity_key(&client.identity_pk(), &client.kex_pk());
         let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<Task>();
         let (events_tx, events_rx) = std::sync::mpsc::channel::<AppEvent>();
 
@@ -566,7 +572,7 @@ impl AppSync {
             connect_failed: false,
             account: None,
             rejected_spaces: HashSet::new(),
-            device_key,
+            identity_key,
             nickname,
             active_server,
             last_error: None,
@@ -609,7 +615,7 @@ impl AppSync {
         self.incompatible
     }
 
-    /// True when the relay refused this device's credentials. The engine has
+    /// True when the relay refused this identity's credentials. The engine has
     /// stopped retrying: the fix is a valid account token, not patience.
     pub fn rejected(&self) -> bool {
         self.rejected
@@ -628,10 +634,10 @@ impl AppSync {
         self.account
     }
 
-    /// hex(`device_pk` ‖ `kex_pk`) — what another user types to invite this
+    /// hex(`identity_pk` ‖ `kex_pk`) — what another user types to invite this
     /// device (TOFU PoC; exchanged out-of-band).
-    pub fn device_key(&self) -> &str {
-        &self.device_key
+    pub fn identity_key(&self) -> &str {
+        &self.identity_key
     }
 
     pub fn set_nickname(&mut self, nickname: String) {
@@ -817,7 +823,7 @@ impl AppSync {
         });
     }
 
-    /// Ask the server which spaces this device can read.
+    /// Ask the server which spaces this installation can read.
     pub fn refresh_remote_spaces(&mut self) {
         let client = self.client.clone();
         self.submit(async move {
@@ -855,7 +861,7 @@ impl AppSync {
     }
 
     /// Owner action: ask the server to destroy the space's content. Each member
-    /// (this device included) keeps its local copy but unsyncs it when the
+    /// (this installation included) keeps its local copy but unsyncs it when the
     /// server's `SpaceDeleted` broadcast comes back through the pump, so this
     /// only fires the request.
     pub fn delete_remote_space(&mut self, remote: Uuid) {
@@ -914,21 +920,21 @@ impl AppSync {
     pub fn share_space(
         &mut self,
         space: Uuid,
-        device_key: &str,
+        identity_key: &str,
         role: MemberRole,
     ) -> Result<(), String> {
-        let (device_pk, kex_pk) = decode_device_key(device_key)?;
-        // Membership is keyed on `device_pk` alone, so inviting our own device
+        let (identity_pk, kex_pk) = decode_identity_key(identity_key)?;
+        // Membership is keyed on `identity_pk` alone, so inviting our own device
         // (even with a tweaked `kex_pk`) would re-add ourselves and could drop
         // our own permissions, leaving us stuck.
-        if device_pk == self.client.device_pk() {
-            return Err("that's this device's own key — you can't invite yourself".into());
+        if identity_pk == self.client.identity_pk() {
+            return Err("that's this identity's own key — you can't invite yourself".into());
         }
         let client = self.client.clone();
         self.submit(async move {
             AppEvent::MemberAdded {
                 space,
-                result: client.add_member(space, device_pk, kex_pk, role).await,
+                result: client.add_member(space, identity_pk, kex_pk, role).await,
             }
         });
         Ok(())
@@ -943,14 +949,14 @@ impl AppSync {
         self.members.get(&space).cloned().unwrap_or_default()
     }
 
-    /// True when this device may manage members (add/remove/role) in `space`.
+    /// True when this installation may manage members (add/remove/role) in `space`.
     pub fn can_admin(&self, space: Uuid) -> bool {
         self.members
             .get(&space)
             .is_some_and(|list| list.iter().any(|m| m.is_self && m.role.can_admin()))
     }
 
-    /// True when this device may edit docs in `space` (Owner or Writer).
+    /// True when this installation may edit docs in `space` (Owner or Writer).
     /// A space whose member list hasn't been loaded yet is treated as writable
     /// so the editor doesn't flash read-only before the background membership
     /// refresh lands; readers only ever resolve to `false` once their role is
@@ -996,25 +1002,25 @@ impl AppSync {
         });
     }
 
-    /// Revoke a device's access: rotates the space key and drops it from the
+    /// Revoke a identity's access: rotates the space key and drops it from the
     /// member set.
-    pub fn uninvite(&mut self, space: Uuid, device_pk: DevicePk) {
+    pub fn uninvite(&mut self, space: Uuid, identity_pk: IdentityPk) {
         let client = self.client.clone();
         self.submit(async move {
             AppEvent::MemberRemoved {
                 space,
-                result: client.remove_member(space, device_pk).await,
+                result: client.remove_member(space, identity_pk).await,
             }
         });
     }
 
     /// Change an existing member's permission level.
-    pub fn change_member_role(&mut self, space: Uuid, device_pk: DevicePk, role: MemberRole) {
+    pub fn change_member_role(&mut self, space: Uuid, identity_pk: IdentityPk, role: MemberRole) {
         let client = self.client.clone();
         self.submit(async move {
             AppEvent::MemberRoleChanged {
                 space,
-                result: client.set_member_role(space, device_pk, role).await,
+                result: client.set_member_role(space, identity_pk, role).await,
             }
         });
     }
@@ -1035,7 +1041,7 @@ impl AppSync {
     }
 
     /// Propagate a local image deletion. Two parts: retract the blob from the
-    /// space index doc so peers (and this device after a restart) stop resolving
+    /// space index doc so peers (and this installation after a restart) stop resolving
     /// its `./blob/<name>` link and re-downloading it, and tell the relay to
     /// drop the sealed content so it isn't orphaned in server storage.
     pub fn blob_deleted(&mut self, notes: &NoteDatabase, space_id: i64, blob: Uuid) {
@@ -1123,7 +1129,7 @@ impl AppSync {
         selection_anchor: Option<usize>,
     ) {
         // Presence is broadcast even without a nickname: peers fall back to a
-        // short device id, so an unnamed device's caret still shows up.
+        // short identity id, so an unnamed identity's caret still shows up.
         if !self.connected {
             return;
         }
@@ -1155,7 +1161,7 @@ impl AppSync {
         );
     }
 
-    /// Everyone present on any doc of a space (deduped by device).
+    /// Everyone present on any doc of a space (deduped by identity).
     pub fn space_presence(&mut self, notes: &NoteDatabase, local_space: i64) -> Vec<Presence> {
         let Some(remote) = notes.space_remote(local_space) else {
             return Vec::new();
@@ -1166,13 +1172,13 @@ impl AppSync {
             .filter(|(_, d)| d.space == remote)
             .map(|(id, _)| *id)
             .collect();
-        let mut by_device: HashMap<DevicePk, Presence> = HashMap::new();
+        let mut by_identity: HashMap<IdentityPk, Presence> = HashMap::new();
         for doc in docs {
             for presence in self.presence(&doc) {
-                by_device.entry(presence.device).or_insert(presence);
+                by_identity.entry(presence.identity).or_insert(presence);
             }
         }
-        let mut list: Vec<Presence> = by_device.into_values().collect();
+        let mut list: Vec<Presence> = by_identity.into_values().collect();
         list.sort_by(|a, b| a.nickname.cmp(&b.nickname));
         list
     }
@@ -1501,17 +1507,17 @@ impl AppSync {
                 self.members_refreshing.remove(&space);
                 match result {
                     Ok(entries) => {
-                        let self_pk = self.client.device_pk();
+                        let self_pk = self.client.identity_pk();
                         let mut list: Vec<MemberView> = entries
                             .into_iter()
                             .map(|entry| MemberView {
-                                device_pk: entry.device_pk,
+                                identity_pk: entry.identity_pk,
                                 role: entry.role,
-                                is_self: entry.device_pk == self_pk,
+                                is_self: entry.identity_pk == self_pk,
                             })
                             .collect();
                         // This device first, then owners → writers → readers.
-                        list.sort_by_key(|m| (!m.is_self, m.role as u8, m.device_pk));
+                        list.sort_by_key(|m| (!m.is_self, m.role as u8, m.identity_pk));
                         self.members.insert(space, list);
                     }
                     Err(err) => self.record_error(&err),
@@ -1688,7 +1694,7 @@ impl AppSync {
             }
             SyncEvent::Ephemeral {
                 doc_id,
-                author_device,
+                author_identity,
                 payload,
             } => {
                 match decode_presence(&payload) {
@@ -1700,14 +1706,14 @@ impl AppSync {
                         // Unnamed peers still get a stable label so their caret
                         // tag isn't blank.
                         let nickname = if nickname.is_empty() {
-                            short_device_id(&author_device)
+                            short_identity_id(&author_identity)
                         } else {
                             nickname
                         };
                         self.presence.entry(doc_id).or_default().insert(
-                            author_device,
+                            author_identity,
                             Presence {
-                                device: author_device,
+                                identity: author_identity,
                                 nickname,
                                 caret,
                                 selection_anchor,
@@ -1717,7 +1723,7 @@ impl AppSync {
                     }
                     Some(PresenceUpdate::Gone) => {
                         if let Some(entries) = self.presence.get_mut(&doc_id) {
-                            entries.remove(&author_device);
+                            entries.remove(&author_identity);
                         }
                     }
                     None => {}
@@ -1770,12 +1776,12 @@ impl AppSync {
                     level: NoticeLevel::Danger,
                     message: "This server needs an account to sync a space - add your \
                               token in Settings > Sync. Your notes are safe, still \
-                              stored on this device."
+                              stored on this installation."
                         .to_string(),
                 });
             }
             SyncEvent::Rejected { context } => {
-                log::warn!("relay refused this device: {context}");
+                log::warn!("relay refused this installation: {context}");
                 self.connected = false;
                 self.rejected = true;
                 self.record_durable_error(
@@ -1816,7 +1822,7 @@ impl AppSync {
         &mut self,
         doc_id: Uuid,
         update: &[u8],
-        caret_author: Option<DevicePk>,
+        caret_author: Option<IdentityPk>,
         notes: &mut NoteDatabase,
     ) {
         let decoded = match Update::decode_v1(update) {
@@ -1867,17 +1873,17 @@ impl AppSync {
     /// Place `author`'s remote caret at an edit-derived position. Selection
     /// collapses on type, so any prior selection anchor is cleared. Preserves
     /// the nickname learned from earlier presence pings (falls back to a short
-    /// device id until one arrives).
-    fn set_edit_caret(&mut self, doc_id: Uuid, author: DevicePk, caret: Option<StickyIndex>) {
+    /// identity id until one arrives).
+    fn set_edit_caret(&mut self, doc_id: Uuid, author: IdentityPk, caret: Option<StickyIndex>) {
         let entry = self.presence.entry(doc_id).or_default();
         let nickname = entry
             .get(&author)
             .map(|p| p.nickname.clone())
-            .unwrap_or_else(|| short_device_id(&author));
+            .unwrap_or_else(|| short_identity_id(&author));
         entry.insert(
             author,
             Presence {
-                device: author,
+                identity: author,
                 nickname,
                 caret,
                 selection_anchor: None,
@@ -2123,7 +2129,7 @@ impl AppSync {
     /// Inbound blob pass: read the index `blobs`/`blob_meta`/`blob_folders` maps
     /// and adopt any blob not present locally (metadata only), then fetch its
     /// content by id. Renames/moves of already-known blobs are left to the
-    /// owner (a peer never rewrites another device's blob metadata here).
+    /// owner (a peer never rewrites another identity's blob metadata here).
     fn adopt_remote_blobs(
         &mut self,
         space: Uuid,
@@ -2551,31 +2557,31 @@ impl AppSync {
     }
 }
 
-// -- device key + presence codecs ------------------------------------------------
+// -- identity key + presence codecs ----------------------------------------------
 
-fn encode_device_key(device_pk: &DevicePk, kex_pk: &KexPk) -> String {
+fn encode_identity_key(identity_pk: &IdentityPk, kex_pk: &KexPk) -> String {
     let mut out = String::with_capacity(128);
-    for b in device_pk.iter().chain(kex_pk.iter()) {
+    for b in identity_pk.iter().chain(kex_pk.iter()) {
         out.push_str(&format!("{b:02x}"));
     }
     out
 }
 
-fn decode_device_key(text: &str) -> Result<(DevicePk, KexPk), String> {
+fn decode_identity_key(text: &str) -> Result<(IdentityPk, KexPk), String> {
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     if text.len() != 128 {
-        return Err("device key must be 128 hex characters".into());
+        return Err("identity key must be 128 hex characters".into());
     }
     let mut bytes = [0u8; 64];
     for (i, chunk) in text.as_bytes().chunks(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).map_err(|_| "invalid device key")?;
-        bytes[i] = u8::from_str_radix(hex, 16).map_err(|_| "invalid device key")?;
+        let hex = std::str::from_utf8(chunk).map_err(|_| "invalid identity key")?;
+        bytes[i] = u8::from_str_radix(hex, 16).map_err(|_| "invalid identity key")?;
     }
-    let mut device_pk = [0u8; 32];
+    let mut identity_pk = [0u8; 32];
     let mut kex_pk = [0u8; 32];
-    device_pk.copy_from_slice(&bytes[..32]);
+    identity_pk.copy_from_slice(&bytes[..32]);
     kex_pk.copy_from_slice(&bytes[32..]);
-    Ok((device_pk, kex_pk))
+    Ok((identity_pk, kex_pk))
 }
 
 /// A decoded presence ephemeral.
@@ -2625,7 +2631,7 @@ fn decode_presence(payload: &[u8]) -> Option<PresenceUpdate> {
     if leaving {
         return Some(PresenceUpdate::Gone);
     }
-    // An empty nickname is allowed; the caller substitutes a device-id label.
+    // An empty nickname is allowed; the caller substitutes an identity-id label.
     let caret = caret.and_then(|bytes| yrs::StickyIndex::decode_v1(&bytes).ok());
     let selection_anchor =
         selection_anchor.and_then(|bytes| yrs::StickyIndex::decode_v1(&bytes).ok());
@@ -2641,16 +2647,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_key_roundtrip() {
-        let device_pk = [7u8; 32];
+    fn identity_key_roundtrip() {
+        let identity_pk = [7u8; 32];
         let kex_pk = [9u8; 32];
-        let text = encode_device_key(&device_pk, &kex_pk);
+        let text = encode_identity_key(&identity_pk, &kex_pk);
         assert_eq!(text.len(), 128);
-        assert_eq!(decode_device_key(&text).unwrap(), (device_pk, kex_pk));
+        assert_eq!(decode_identity_key(&text).unwrap(), (identity_pk, kex_pk));
         // Whitespace-tolerant (pasted keys often wrap).
         let spaced = format!("{} {}", &text[..64], &text[64..]);
-        assert_eq!(decode_device_key(&spaced).unwrap(), (device_pk, kex_pk));
-        assert!(decode_device_key("abc").is_err());
+        assert_eq!(decode_identity_key(&spaced).unwrap(), (identity_pk, kex_pk));
+        assert!(decode_identity_key("abc").is_err());
     }
 
     #[test]
@@ -2685,7 +2691,7 @@ mod tests {
         assert_eq!(text.get_string(&txn).len(), 14);
         drop(txn);
 
-        // Empty nicknames now decode (the caller substitutes a device label);
+        // Empty nicknames now decode (the caller substitutes a identity label);
         // only genuinely malformed payloads are rejected.
         assert!(matches!(
             decode_presence(&encode_presence("bob", None, None)),

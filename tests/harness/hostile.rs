@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use enkr_proto::membership::MemberRole;
-use enkr_proto::wire::{self, DevicePk, UpdateFrame};
+use enkr_proto::wire::{self, IdentityPk, UpdateFrame};
 use enkr_syncd::storage::{
     Account, EnvelopeRow, NewAccount, Result, SnapshotRow, SqliteStore, Store, StoreError,
 };
@@ -93,12 +93,12 @@ impl Store for HostileStore {
         self.inner.set_account_expiry(account_id, expires_at).await
     }
 
-    async fn bind_device_account(
+    async fn bind_identity_account(
         &self,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         account_id: Option<&Uuid>,
     ) -> Result<()> {
-        self.inner.bind_device_account(device_pk, account_id).await
+        self.inner.bind_identity_account(identity_pk, account_id).await
     }
 
     async fn space_owner_account(&self, space_id: &Uuid) -> Result<Option<Uuid>> {
@@ -109,8 +109,8 @@ impl Store for HostileStore {
         self.inner.recompute_usage().await
     }
 
-    async fn upsert_device(&self, device_pk: &DevicePk, kex_pk: &[u8; 32], now: i64) -> Result<()> {
-        self.inner.upsert_device(device_pk, kex_pk, now).await
+    async fn upsert_identity(&self, identity_pk: &IdentityPk, kex_pk: &[u8; 32], now: i64) -> Result<()> {
+        self.inner.upsert_identity(identity_pk, kex_pk, now).await
     }
 
     async fn space_epoch(&self, space_id: &Uuid) -> Result<Option<u32>> {
@@ -120,7 +120,7 @@ impl Store for HostileStore {
     async fn create_space(
         &self,
         space_id: &Uuid,
-        creator: &DevicePk,
+        creator: &IdentityPk,
         signed_op: &[u8],
         envelopes: &[EnvelopeRow],
         now: i64,
@@ -133,7 +133,7 @@ impl Store for HostileStore {
     async fn add_member(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         role: MemberRole,
         epoch_added: u32,
         op_seq: u64,
@@ -144,7 +144,7 @@ impl Store for HostileStore {
         self.inner
             .add_member(
                 space_id,
-                device_pk,
+                identity_pk,
                 role,
                 epoch_added,
                 op_seq,
@@ -158,7 +158,7 @@ impl Store for HostileStore {
     async fn remove_member(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
         new_epoch: u32,
         op_seq: u64,
         signed_op: &[u8],
@@ -167,25 +167,25 @@ impl Store for HostileStore {
     ) -> Result<()> {
         self.inner
             .remove_member(
-                space_id, device_pk, new_epoch, op_seq, signed_op, envelopes, now,
+                space_id, identity_pk, new_epoch, op_seq, signed_op, envelopes, now,
             )
             .await
     }
 
-    async fn is_active_member(&self, space_id: &Uuid, device_pk: &DevicePk) -> Result<bool> {
-        self.inner.is_active_member(space_id, device_pk).await
+    async fn is_active_member(&self, space_id: &Uuid, identity_pk: &IdentityPk) -> Result<bool> {
+        self.inner.is_active_member(space_id, identity_pk).await
     }
 
     async fn member_role(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
     ) -> Result<Option<MemberRole>> {
-        self.inner.member_role(space_id, device_pk).await
+        self.inner.member_role(space_id, identity_pk).await
     }
 
-    async fn spaces_for_device(&self, device_pk: &DevicePk) -> Result<Vec<Uuid>> {
-        self.inner.spaces_for_device(device_pk).await
+    async fn spaces_for_identity(&self, identity_pk: &IdentityPk) -> Result<Vec<Uuid>> {
+        self.inner.spaces_for_identity(identity_pk).await
     }
 
     async fn delete_space(&self, space_id: &Uuid) -> Result<()> {
@@ -206,12 +206,12 @@ impl Store for HostileStore {
         Ok(ops)
     }
 
-    async fn envelopes_for_device(
+    async fn envelopes_for_identity(
         &self,
         space_id: &Uuid,
-        device_pk: &DevicePk,
+        identity_pk: &IdentityPk,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
-        self.inner.envelopes_for_device(space_id, device_pk).await
+        self.inner.envelopes_for_identity(space_id, identity_pk).await
     }
 
     async fn create_doc(&self, doc_id: &Uuid, space_id: &Uuid, now: i64) -> Result<()> {

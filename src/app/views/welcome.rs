@@ -8,7 +8,7 @@
 //!
 //! So this screen asks that question once, plainly, and offers the settings
 //! facts a first-run user actually wants (where the data lives, which build
-//! this is, who this device is). Working offline is a first-class answer here,
+//! this is, who this installation is). Working offline is a first-class answer here,
 //! not a decline.
 
 use crate::app::*;
@@ -75,7 +75,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
             .font_size(ui, 26.0);
             ui.wrapping_label(if spaces_step {
                 "Start a new space, or bring one that is already on this server \
-                 onto this device."
+                 onto this installation."
             } else {
                 "Markdown notes, organised into spaces. Everything you sync is \
                  end-to-end encrypted — the server never sees your text."
@@ -157,13 +157,13 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
                                         .text_color(ui, pal.text)
                                         .font_size(ui, 13.0);
                                     if remote.local.is_some() {
-                                        ui.label("on this device")
+                                        ui.label("on this installation")
                                             .text_color(ui, pal.text_muted)
                                             .font_size(ui, 12.0);
                                     } else if enkr_button(
                                         ui,
                                         &format!("Copy here###enkr_welcome_fetch_{id_full}"),
-                                        Some("Bring this space onto this device"),
+                                        Some("Bring this space onto this installation"),
                                         BtnVariant::Secondary,
                                     )
                                     .height(ui, UISize::Pixels(26.0))
@@ -198,7 +198,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
                     // space, and it is the only one that requires handing something
                     // to another person.
                     spacer(ui, "###enkr_welcome_gap3", 8.0);
-                    settings_heading(ui, "Your device key");
+                    settings_heading(ui, "Your identity key");
                     ui.wrapping_label(
                         "Send this to someone so they can invite you to a shared space.",
                     )
@@ -208,7 +208,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
                     let key = state
                         .sync
                         .as_ref()
-                        .map(|sync| sync.device_key().to_string())
+                        .map(|sync| sync.identity_key().to_string())
                         .unwrap_or_default();
                     let row = ui.named_row("###enkr_welcome_key_row", |ui| {
                         ui.label(&short_key(&key))
@@ -270,7 +270,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
                 match state.welcome_tab {
                     WelcomeTab::Offline => {
                         ui.wrapping_label(
-                            "Your notes stay on this device. Nothing is sent anywhere. You can \
+                            "Your notes stay on this installation. Nothing is sent anywhere. You can \
                          connect later from Settings.",
                         )
                         .width(ui, UISize::ParentPct(1.0))
@@ -279,7 +279,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
                         if enkr_button(
                             ui,
                             "Start offline###enkr_welcome_offline",
-                            Some("Keep everything on this device"),
+                            Some("Keep everything on this installation"),
                             BtnVariant::Primary,
                         )
                         .width(ui, UISize::ParentPct(1.0))
@@ -291,7 +291,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
                     }
                     WelcomeTab::Online => {
                         ui.wrapping_label(
-                            "Share spaces across your devices, and with other people. Pick a \
+                            "Share spaces across your identities, and with other people. Pick a \
                          name they'll see beside your cursor.",
                         )
                         .width(ui, UISize::ParentPct(1.0))
@@ -489,7 +489,7 @@ pub(crate) fn welcome_view(ui: &mut IMUI, state: &mut EnkrState, pal: &Colors) -
     }
     if let Some(key) = copy_key {
         mae::os::clipboard_set(&key);
-        ui.toast(ToastLevel::Info, "Device key copied");
+        ui.toast(ToastLevel::Info, "Identity key copied");
     }
     root
 }
