@@ -772,6 +772,7 @@ async fn history_survives_envelope_collection() {
     let config = ServerConfig {
         gc_interval: Duration::from_millis(100),
         snapshot_retention: Duration::from_millis(0),
+        snapshot_settle: Duration::from_millis(0),
         snapshot_request_threshold: 2,
         ..ServerConfig::default()
     };
@@ -1050,6 +1051,7 @@ async fn single_client_compaction_via_request_snapshot_and_gc() {
     let mut config = ServerConfig::default();
     config.snapshot_request_threshold = 10;
     config.snapshot_retention = Duration::from_millis(0); // self-ack instantly
+    config.snapshot_settle = Duration::from_millis(0);
     config.gc_interval = Duration::from_millis(100);
     let server = TestServer::start(config).await;
 
@@ -1110,6 +1112,7 @@ async fn edits_still_propagate_after_the_gc_drains_a_compacted_doc() {
     let mut config = ServerConfig::default();
     config.snapshot_request_threshold = 2;
     config.snapshot_retention = Duration::from_millis(0); // self-ack instantly
+    config.snapshot_settle = Duration::from_millis(0);
     config.gc_interval = Duration::from_millis(100);
     let server = TestServer::start(config).await;
 
@@ -1319,6 +1322,7 @@ async fn storage_stays_bounded_under_continuous_editing() {
     let mut config = ServerConfig::default();
     config.snapshot_request_threshold = 10;
     config.snapshot_retention = Duration::from_millis(0);
+    config.snapshot_settle = Duration::from_millis(0);
     config.gc_interval = Duration::from_millis(50);
     let server = TestServer::start(config).await;
 
@@ -1349,6 +1353,7 @@ async fn zero_net_delta_churn_storage() {
     let mut config = ServerConfig::default();
     config.snapshot_request_threshold = 20;
     config.snapshot_retention = Duration::from_millis(0); // self-ack instantly
+    config.snapshot_settle = Duration::from_millis(0);
     config.gc_interval = Duration::from_millis(50);
     let server = TestServer::start(config).await;
 
@@ -1431,6 +1436,7 @@ async fn cold_sync_10k_updates_under_a_second() {
     let mut config = ServerConfig::default();
     config.snapshot_request_threshold = 1000;
     config.snapshot_retention = Duration::from_millis(0);
+    config.snapshot_settle = Duration::from_millis(0);
     config.gc_interval = Duration::from_millis(200);
     let server = TestServer::start(config).await;
 
@@ -1499,5 +1505,206 @@ async fn ephemeral_frames_relayed_not_stored() {
     assert_eq!(
         updates, stored_before,
         "ephemeral frames must never be persisted"
+    );
+}
+
+// ===========================================================================
+// Untrusted-relay hardening (audit follow-ups)
+// ===========================================================================
+
+/// A relay cannot make a client encrypt under a key the relay chose.
+///
+/// Key envelopes are anonymous X25519 sealed boxes: wrapping one needs only the
+/// recipient's *public* kex key, which the relay stores and which travels in the
+/// membership log. So "it unsealed cleanly" proves nothing about who wrapped it.
+/// If the client took the numerically-highest epoch it had a key for, a relay
+/// could offer an envelope for an epoch that never happened and have every
+/// subsequent edit — and every snapshot, which is the whole document — sealed
+/// under a key it knows. That is a total break of the property this protocol
+/// exists to provide.
+///
+/// The signed membership log is the only authenticated statement about which
+/// epochs exist, so it is the ceiling.
+#[tokio::test]
+async fn a_relay_forged_key_envelope_is_never_used_to_seal() {
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "before;").await.unwrap();
+    owner.flush().await.unwrap();
+    converge(&[&owner], doc).await;
+
+    // The relay arms itself before the victim's join, which is what triggers
+    // the envelope fetch. The space has only ever been at epoch 0 — nobody has
+    // been removed — so epoch 7 is an epoch the signed log does not justify,
+    // and the relay is inventing it out of nothing but the victim's *public*
+    // kex key.
+    let victim = server.client();
+    wait_connected(&victim).await;
+    hostility.forge_envelope_for_epoch(7, victim.kex_pk());
+    invite_and_join(&owner, &victim, space).await;
+    victim.open_doc(space, doc).await.unwrap();
+    converge(&[&owner, &victim], doc).await;
+
+    // If the victim adopted the forged key it would seal under epoch 7, and the
+    // owner — which holds only the real epoch-0 key — could never read this.
+    victim.insert_text(doc, 0, "victim;").await.unwrap();
+    victim.flush().await.unwrap();
+    let text = converge(&[&owner, &victim], doc).await;
+    assert!(
+        text.contains("victim;") && text.contains("before;"),
+        "an honest member could not read content the relay's forged key sealed: {text:?}"
+    );
+
+    // Belt and braces: nothing on the relay is sealed under the invented epoch.
+    let forged: i64 = server
+        .raw_db()
+        .query_row("SELECT COUNT(*) FROM updates WHERE epoch = 7", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        forged, 0,
+        "a frame was sealed under the epoch the relay invented"
+    );
+}
+
+/// A frame parked for a later retry must still retire its sequence.
+///
+/// Deferral is routine — neither adding a member nor promoting one bumps the
+/// epoch, so a connected peer legitimately sees a frame from a device its copy
+/// of the log does not know yet. If the retry never advances `have_seq`, the
+/// contiguous frontier pins below that frame for the life of the doc: every
+/// reconnect re-downloads the same backlog and the compaction threshold never
+/// fires again.
+#[tokio::test]
+async fn a_deferred_frame_retires_its_sequence_once_it_applies() {
+    let server = TestServer::start_default().await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+
+    let peer = server.client();
+    wait_connected(&peer).await;
+    invite_and_join(&owner, &peer, space).await;
+    peer.open_doc(space, doc).await.unwrap();
+    converge(&[&owner, &peer], doc).await;
+
+    // A late joiner: the peer above is already connected and has no reason to
+    // refetch the log, so the newcomer's first frames arrive from a device the
+    // peer's replica cannot yet authorise, and get deferred.
+    let late = server.client();
+    wait_connected(&late).await;
+    invite_and_join(&owner, &late, space).await;
+    late.open_doc(space, doc).await.unwrap();
+    late.insert_text(doc, 0, "late;").await.unwrap();
+    late.flush().await.unwrap();
+
+    let text = converge(&[&owner, &peer, &late], doc).await;
+    assert!(text.contains("late;"), "deferred frame never applied");
+
+    // Applying it is not enough: the frontier has to move with it. Parking
+    // happens before the sequence is retired, so if the retry does not retire
+    // it the contiguous frontier pins below that frame for the life of the
+    // doc — every reconnect re-downloads the same backlog, and the compaction
+    // threshold never fires again. Nothing else in the replica looks wrong.
+    let head: u64 = server
+        .raw_db()
+        .query_row(
+            "SELECT head_seq FROM docs WHERE doc_id = ?",
+            [&doc.as_bytes()[..]],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap() as u64;
+    assert!(head > 0, "no updates were stored");
+
+    let status = peer.status().await.unwrap();
+    let peer_have = status.have_seq.get(&doc).copied().unwrap_or(0);
+    assert_eq!(
+        peer_have, head,
+        "the peer applied the deferred frame but left its frontier at {peer_have} \
+         of {head}: it will re-download this backlog on every reconnect"
+    );
+}
+
+/// The relay will not compact the update log behind a snapshot that has not
+/// settled, however acked it looks.
+///
+/// A snapshot is a full-state replace the relay cannot read, let alone verify
+/// covers what it claims, and the "ack" is a heuristic — some other device
+/// subscribed past it — not a confirmation that anyone decrypted or applied it.
+/// Compacting the instant that heuristic fires means one bad snapshot destroys
+/// the only other copy of the history, permanently and silently. The settling
+/// window is what leaves that recoverable.
+#[tokio::test]
+async fn gc_holds_the_log_until_a_snapshot_has_settled() {
+    let mut config = ServerConfig::default();
+    config.snapshot_request_threshold = 4;
+    config.snapshot_retention = Duration::from_millis(0); // ack heuristic fires
+    config.snapshot_settle = Duration::from_secs(600); // ...but nothing has settled
+    config.gc_interval = Duration::from_millis(100);
+    let server = TestServer::start(config).await;
+
+    let a = server.client();
+    wait_connected(&a).await;
+    let space = a.create_space().await.unwrap();
+    let doc = a.create_doc(space).await.unwrap();
+
+    for i in 0..16 {
+        a.insert_text(doc, 0, format!("{i};")).await.unwrap();
+        a.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    converge(&[&a], doc).await;
+
+    // A second device subscribing is exactly what trips the ack heuristic.
+    let b = server.client();
+    wait_connected(&b).await;
+    invite_and_join(&a, &b, space).await;
+    b.open_doc(space, doc).await.unwrap();
+    converge(&[&a, &b], doc).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let conn = server.raw_db();
+    let snapshots: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE doc_id = ?",
+            [&doc.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(snapshots >= 1, "server never received a snapshot");
+
+    let acked: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE doc_id = ? AND acked = 1",
+            [&doc.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(acked >= 1, "the ack heuristic never fired, so this proves nothing");
+
+    let head: i64 = conn
+        .query_row(
+            "SELECT head_seq FROM docs WHERE doc_id = ?",
+            [&doc.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let updates: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM updates WHERE doc_id = ?",
+            [&doc.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        updates, head,
+        "an acked-but-unsettled snapshot let the GC delete the history behind it"
     );
 }

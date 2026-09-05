@@ -38,6 +38,15 @@ pub struct Hostility {
     /// Replay one stored update as a later sequence number in a backlog.
     /// This simulates a relay presenting old signed content after revocation.
     pub replay_update_as_seq: AtomicU64,
+    /// Append a forged key envelope for this epoch to every envelope fetch,
+    /// sealed to the *requesting* device under a space key the relay chose.
+    ///
+    /// A sealed box is anonymous — wrapping one needs only the recipient's
+    /// public kex key, which the relay has — so this needs no stolen secret
+    /// and no cooperating member. `0` disables it.
+    pub forge_envelope_epoch: AtomicU64,
+    /// Who the forged envelope is sealed to (the victim's public kex key).
+    pub forge_envelope_recipient: std::sync::Mutex<Option<[u8; 32]>>,
 }
 
 impl Hostility {
@@ -60,7 +69,17 @@ impl Hostility {
     pub fn replay_update_once_as(&self, seq: u64) {
         self.replay_update_as_seq.store(seq, Ordering::Relaxed);
     }
+
+    pub fn forge_envelope_for_epoch(&self, epoch: u32, recipient_kex: [u8; 32]) {
+        *self.forge_envelope_recipient.lock().unwrap() = Some(recipient_kex);
+        self.forge_envelope_epoch
+            .store(epoch as u64, Ordering::Relaxed);
+    }
 }
+
+/// The space key the hostile relay tries to make clients adopt. Fixed so a test
+/// can check whether content ended up encrypted under it.
+pub const FORGED_SPACE_KEY: [u8; 32] = [0xAB; 32];
 
 pub struct HostileStore {
     pub inner: SqliteStore,
@@ -211,7 +230,23 @@ impl Store for HostileStore {
         space_id: &Uuid,
         identity_pk: &IdentityPk,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
-        self.inner.envelopes_for_identity(space_id, identity_pk).await
+        let mut envelopes = self.inner.envelopes_for_identity(space_id, identity_pk).await?;
+        let forged = self.hostility.forge_envelope_epoch.load(Ordering::Relaxed);
+        if forged > 0 {
+            // The relay knows every member's public kex key (it stores them and
+            // they travel in the membership log), and sealing needs nothing
+            // else. So it can offer any device a key of its choosing for any
+            // epoch it likes.
+            let Some(kex_pk) = *self.hostility.forge_envelope_recipient.lock().unwrap() else {
+                return Ok(envelopes);
+            };
+            let sealed = enkr_proto::crypto::seal_space_key(
+                &kex_pk,
+                &enkr_proto::crypto::SpaceKey(FORGED_SPACE_KEY),
+            );
+            envelopes.push((forged as u32, sealed));
+        }
+        Ok(envelopes)
     }
 
     async fn create_doc(&self, doc_id: &Uuid, space_id: &Uuid, now: i64) -> Result<()> {
@@ -310,8 +345,12 @@ impl Store for HostileStore {
         self.inner.ack_snapshot(doc_id, covers_seq).await
     }
 
-    async fn gc_eligible(&self, created_before: i64) -> Result<Vec<(Uuid, u64)>> {
-        self.inner.gc_eligible(created_before).await
+    async fn gc_eligible(
+        &self,
+        settled_before: i64,
+        unacked_before: i64,
+    ) -> Result<Vec<(Uuid, u64)>> {
+        self.inner.gc_eligible(settled_before, unacked_before).await
     }
 
     async fn gc_updates_through(&self, doc_id: &Uuid, seq: u64) -> Result<u64> {

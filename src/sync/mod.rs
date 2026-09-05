@@ -243,6 +243,12 @@ pub struct SyncStatus {
     pub outbox_len: usize,
     /// Docs with queued update bytes in the debounce buffer.
     pub pending_docs: usize,
+    /// Per doc, the highest *contiguous* server seq incorporated — the point a
+    /// resubscribe would resume from. Exposed because it is otherwise
+    /// unobservable, and a frontier that silently stops advancing (a frame
+    /// parked and never re-sequenced) looks exactly like a healthy replica
+    /// while re-downloading the same backlog on every reconnect.
+    pub have_seq: std::collections::HashMap<Uuid, u64>,
 }
 
 pub(crate) enum Cmd {

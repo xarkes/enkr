@@ -296,9 +296,13 @@ impl Store for MeteredStore {
         self.inner.ack_snapshot(doc_id, covers_seq).await
     }
 
-    async fn gc_eligible(&self, created_before: i64) -> Result<Vec<(Uuid, u64)>> {
+    async fn gc_eligible(
+        &self,
+        settled_before: i64,
+        unacked_before: i64,
+    ) -> Result<Vec<(Uuid, u64)>> {
         StoreMetrics::bump(&self.metrics.gc_eligible);
-        self.inner.gc_eligible(created_before).await
+        self.inner.gc_eligible(settled_before, unacked_before).await
     }
 
     async fn gc_updates_through(&self, doc_id: &Uuid, seq: u64) -> Result<u64> {

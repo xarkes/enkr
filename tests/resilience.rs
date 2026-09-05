@@ -218,6 +218,7 @@ async fn gc_during_catch_up_does_not_strand_a_subscriber() {
     let config = ServerConfig {
         gc_interval: Duration::from_millis(20),
         snapshot_retention: Duration::from_millis(0),
+        snapshot_settle: Duration::from_millis(0),
         snapshot_request_threshold: 8,
         backlog_page: 4,
         ..ServerConfig::default()

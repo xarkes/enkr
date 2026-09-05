@@ -23,13 +23,17 @@ pub(crate) fn validate_server_url(raw: &str) -> Result<(), WsError> {
     match url.scheme() {
         "wss" => Ok(()),
         "ws" => {
+            // `host()`, not `host_str()`: the latter renders an IPv6 literal
+            // with its brackets (`[::1]`), which never parses as an `IpAddr` —
+            // so every IPv6 loopback URL was rejected as if it were remote.
             let host = url
-                .host_str()
+                .host()
                 .ok_or_else(|| "sync server URL has no host".to_string())?;
-            let loopback = host == "localhost"
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback());
+            let loopback = match host {
+                url::Host::Domain(host) => host == "localhost",
+                url::Host::Ipv4(ip) => ip.is_loopback(),
+                url::Host::Ipv6(ip) => ip.is_loopback(),
+            };
             if loopback {
                 Ok(())
             } else {

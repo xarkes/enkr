@@ -56,6 +56,16 @@ const UPDATE_FRAME_OVERHEAD: usize = 1024;
 /// yet; bounded so a hostile relay can't use it as a memory amplifier.
 const MAX_DEFERRED_FRAMES: usize = 1024;
 
+/// How far above the signed log's epoch a key envelope may sit and still be
+/// held rather than refused. The membership and envelope fetches race, so one
+/// rotation ahead is ordinary; a stack of them is a relay inventing epochs.
+const MAX_ENVELOPES_AHEAD: u32 = 4;
+
+/// Envelopes held above the log's epoch before new ones are refused. Bounded
+/// for the same reason the deferred-frame queue is: the relay chooses how many
+/// of these to send, and it can send them unsolicited.
+const MAX_PARKED_ENVELOPES: usize = 16;
+
 /// Entries per `Subscribe` message. A `SubscribeEntry` is a uuid plus a varint
 /// seq — about 25 bytes — so this is far below `MAX_MESSAGE_BYTES` and doubles
 /// as the frame-size guard. Chunking also keeps the server's per-message
@@ -86,6 +96,15 @@ enum HandshakeFailure {
         code: wire::ErrorCode,
         context: String,
     },
+}
+
+/// A random 64-bit base for this session's client tags.
+///
+/// `Uuid::new_v4` rather than a `rand` dependency: it is already in this crate's
+/// tree and is CSPRNG-backed on every target, wasm32 included. The top bit is
+/// cleared so a long-lived session's increments cannot wrap.
+fn random_tag_base() -> u64 {
+    (Uuid::new_v4().as_u64_pair().0 & (u64::MAX >> 1)).max(1)
 }
 
 /// A deterministic point in `[0, window]`, mixed from this identity's key and a
@@ -137,7 +156,18 @@ struct DocState {
     /// envelopes arrive) or an author missing from our copy of the membership
     /// log (retried once the log is refreshed). Bounded by `MAX_DEFERRED_FRAMES`
     /// so a hostile relay can't grow it without limit.
-    deferred: Vec<UpdateFrame>,
+    ///
+    /// The seq travels with the frame: parking happens *before* the frontier
+    /// advances, so it is the retry that has to retire the sequence. Without it
+    /// `have_seq` pins below the first deferred frame forever — every reconnect
+    /// re-downloads the same backlog and the compaction threshold never fires.
+    deferred: Vec<(u64, UpdateFrame)>,
+    /// Set when the deferred queue overflowed and a frame was refused. The
+    /// replica may now be missing content it will only get back from a
+    /// resubscribe, so it must not author a snapshot in the meantime: a
+    /// snapshot is a full-state replace and the relay GCs the log behind it,
+    /// which would make the gap permanent for everybody.
+    lost_frames: bool,
     live: bool,
     /// Local updates queued or unacked (drives DocBusy/DocIdle events).
     busy: bool,
@@ -156,11 +186,40 @@ struct SpaceState {
     keys: BTreeMap<u32, SpaceKey>,
     current_epoch: u32,
     membership: MembershipState,
+    /// Envelopes that arrived for an epoch the signed log does not (yet)
+    /// justify. Held rather than dropped because the fetches race: an
+    /// `EpochBump` refetches envelopes and membership independently, so the
+    /// rotated key legitimately turns up before the `Remove` op that authorises
+    /// it. Re-checked against the log every time it grows.
+    parked_envelopes: Vec<wire::Envelope>,
 }
 
 impl SpaceState {
-    fn latest_key(&self) -> Option<(u32, &SpaceKey)> {
-        self.keys.iter().next_back().map(|(e, k)| (*e, k))
+    /// The highest epoch the *signed membership log* justifies.
+    ///
+    /// `MembershipState::current_epoch` only moves through a `Remove` op that
+    /// is signed by an owner and validated to bump by exactly one, so this is
+    /// the one epoch ceiling an untrusted relay cannot inflate. Everything that
+    /// selects a key to encrypt under goes through it.
+    fn authorised_epoch(&self) -> u32 {
+        self.membership.current_epoch
+    }
+
+    /// The key new content is sealed under: the newest one at or below the
+    /// authenticated ceiling.
+    ///
+    /// Deliberately not `keys.last()`. A space key envelope is an anonymous
+    /// X25519 sealed box — sealing one needs nothing but the recipient's public
+    /// kex key, which is public in the membership log — so anybody who can put
+    /// bytes on this connection can offer a key that unseals cleanly. Picking
+    /// the numerically-highest epoch would let them hand us a key for an epoch
+    /// that never happened and have us encrypt everything under it.
+    fn sealing_key(&self) -> Option<(u32, &SpaceKey)> {
+        let ceiling = self.authorised_epoch();
+        self.keys
+            .range(..=ceiling)
+            .next_back()
+            .map(|(e, k)| (*e, k))
     }
 }
 
@@ -288,14 +347,16 @@ impl Engine {
             rejected_spaces: HashSet::new(),
             resubscribe_at: None,
             // The server dedups (device, client_tag) across connections for
-            // outbox-retry idempotency. Tags are no longer persisted, so each
-            // engine session must claim a fresh tag range — a wall-clock
-            // start guarantees no overlap with previous sessions' tags.
-            next_tag: web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(1)
-                .max(1),
+            // outbox-retry idempotency, so each engine session must claim a
+            // tag range that no previous session used.
+            //
+            // Random, not wall-clock. A clock that steps backwards — an NTP
+            // correction, a VM restore, a device with the wrong time — re-issues
+            // tags the relay is still holding, and the relay then answers the
+            // push with the *old* frame's Ack. The outbox entry is retired and
+            // `needs_push` cleared for an update that was never stored: silent
+            // data loss, with no attacker and nothing in the logs.
+            next_tag: random_tag_base(),
             joins: HashMap::new(),
             envelope_queue: HashSet::new(),
             envelopes_inflight: HashSet::new(),
@@ -581,10 +642,13 @@ impl Engine {
             return;
         }
         self.resubscribe_at = None;
+        // `lost_frames` docs are re-driven even while live: the gap is in this
+        // replica, not in the connection, so nothing else would ever ask for
+        // the frames the deferred queue had to refuse.
         let entries: Vec<SubscribeEntry> = self
             .docs
             .iter()
-            .filter(|(_, doc)| !doc.live)
+            .filter(|(_, doc)| !doc.live || doc.lost_frames)
             .map(|(doc_id, doc)| SubscribeEntry {
                 doc_id: *doc_id,
                 have_seq: doc.have_seq,
@@ -692,7 +756,7 @@ impl Engine {
             }
             return;
         }
-        let Some((epoch, key)) = space.latest_key() else {
+        let Some((epoch, key)) = space.sealing_key() else {
             return;
         };
         let (epoch, key) = (epoch, key.clone());
@@ -786,6 +850,7 @@ impl Engine {
             requested_snapshot: None,
             snapshot_asked: None,
             deferred: Vec::new(),
+            lost_frames: false,
             live: false,
             busy: false,
         });
@@ -983,6 +1048,11 @@ impl Engine {
                     rejected: self.rejected,
                     outbox_len: self.outbox.len(),
                     pending_docs,
+                    have_seq: self
+                        .docs
+                        .iter()
+                        .map(|(doc_id, doc)| (*doc_id, doc.have_seq))
+                        .collect(),
                 });
             }
         }
@@ -1019,6 +1089,7 @@ impl Engine {
                 keys: BTreeMap::from([(0, key)]),
                 current_epoch: 0,
                 membership: membership_state,
+                parked_envelopes: Vec::new(),
             },
         );
 
@@ -1316,6 +1387,14 @@ impl Engine {
             ServerMsg::SubscribedOk { doc_id, head_seq } => {
                 if let Some(doc) = self.docs.get_mut(&doc_id) {
                     doc.live = true;
+                    // The replay this subscribe just delivered started at
+                    // `have_seq`, which never advanced past a deferred frame —
+                    // so if nothing is still parked, everything the overflow
+                    // refused has now been applied and the doc may author
+                    // snapshots again.
+                    if doc.lost_frames && doc.deferred.is_empty() {
+                        doc.lost_frames = false;
+                    }
                 }
                 self.emit(SyncEvent::DocSynced { doc_id, head_seq });
             }
@@ -1550,7 +1629,7 @@ impl Engine {
             // reader's forgery parks here too and is simply never retried into
             // acceptance; the buffer is bounded either way.
             log::debug!("doc {doc_id}: frame from a device the log does not authorise");
-            self.defer_frame(doc_id, frame);
+            self.defer_frame(doc_id, seq, frame);
             self.deferred_membership_request(space_id);
             return;
         }
@@ -1562,7 +1641,7 @@ impl Engine {
             // Do not advance the frontier until this frame authenticates and
             // decrypts. It may become usable once the envelope arrives, and a
             // resubscribe must be able to request this sequence again.
-            self.defer_frame(doc_id, frame);
+            self.defer_frame(doc_id, seq, frame);
             self.deferred_envelope_request(space_id_copy);
             return;
         };
@@ -1600,7 +1679,7 @@ impl Engine {
         if !space.membership.can_write(&self.identity.identity_pk()) {
             return;
         }
-        let Some((epoch, key)) = space.latest_key() else {
+        let Some((epoch, key)) = space.sealing_key() else {
             return;
         };
         let frame = crypto::seal_ephemeral(&self.identity, key, &space_id, &doc_id, epoch, payload);
@@ -1645,19 +1724,33 @@ impl Engine {
         }
     }
 
-    /// Queue an envelope fetch from a sync (non-async) code path; sent on the
-    /// next async opportunity, at most one in flight per space.
-    /// Park a frame we can't process yet. Dropping the oldest on overflow
-    /// keeps a hostile relay from growing this without bound; the frames lost
-    /// that way are ones we were never able to decrypt or attribute anyway.
-    fn defer_frame(&mut self, doc_id: Uuid, frame: UpdateFrame) {
+    /// Park a frame we can't process yet, with the seq it arrived under.
+    ///
+    /// The queue is bounded so a hostile relay can't grow it without limit, but
+    /// an overflow is a real gap in this replica, not a free drop: the frames
+    /// concerned are ones a later membership or envelope fetch might well have
+    /// made readable. So the newest is refused (the queue already holds the
+    /// older, more-likely-resolvable prefix), the doc is flagged, and a
+    /// resubscribe is scheduled — `have_seq` never advanced past any of them,
+    /// so the relay will re-deliver the whole run.
+    fn defer_frame(&mut self, doc_id: Uuid, seq: u64, frame: UpdateFrame) {
         let Some(doc) = self.docs.get_mut(&doc_id) else {
             return;
         };
         if doc.deferred.len() >= MAX_DEFERRED_FRAMES {
-            doc.deferred.remove(0);
+            let first_overflow = !doc.lost_frames;
+            doc.lost_frames = true;
+            self.resubscribe_at
+                .get_or_insert(Instant::now() + self.config.reconnect_min);
+            if first_overflow {
+                self.warn_security(format!(
+                    "doc {doc_id}: deferred-frame buffer full at seq {seq}; \
+                     re-subscribing and withholding snapshots until it clears"
+                ));
+            }
+            return;
         }
-        doc.deferred.push(frame);
+        doc.deferred.push((seq, frame));
     }
 
     fn deferred_envelope_request(&mut self, space_id: Uuid) {
@@ -1716,7 +1809,12 @@ impl Engine {
         let server_asked = doc.requested_snapshot.is_some_and(|covers| have >= covers);
         let threshold_crossed =
             have.saturating_sub(doc.snapshot_covers) >= self.config.snapshot_threshold && doc.live;
+        // A replica with a known gap must not author a snapshot. The snapshot
+        // would be honest, well-signed and *incomplete*, and the relay GCs the
+        // update log behind it — so the gap would stop being this device's
+        // problem and become everyone's, permanently.
         if (server_asked || threshold_crossed)
+            && !doc.lost_frames
             && have > 0
             && doc.snapshot_asked.is_none_or(|asked| have > asked)
         {
@@ -1804,7 +1902,7 @@ impl Engine {
         if !space.membership.can_write(&self.identity.identity_pk()) {
             return;
         }
-        let Some((epoch, key)) = space.latest_key() else {
+        let Some((epoch, key)) = space.sealing_key() else {
             return;
         };
         let snapshot = crypto::seal_snapshot(
@@ -1898,12 +1996,72 @@ impl Engine {
             keys: BTreeMap::new(),
             current_epoch: 0,
             membership: MembershipState::default(),
+            parked_envelopes: Vec::new(),
         });
-        for envelope in envelopes {
+        let room = MAX_PARKED_ENVELOPES.saturating_sub(space.parked_envelopes.len());
+        space.parked_envelopes.extend(envelopes.into_iter().take(room));
+        // The server's `current_epoch` is an unauthenticated hint. It may point
+        // the key fetch at an epoch we have not yet seen the `Remove` op for,
+        // which is fine — but it must never widen what we are willing to seal
+        // under, so `sealing_key` reads the log's epoch, not this.
+        space.current_epoch = space.current_epoch.max(current_epoch);
+        let rejected = self.absorb_parked_envelopes(space_id);
+        for epoch in rejected {
+            self.warn_security(format!(
+                "space {space_id}: refused a key envelope for epoch {epoch}, \
+                 which the signed membership log does not authorise"
+            ));
+        }
+
+        self.retry_deferred_frames(space_id);
+        self.finish_join(space_id, |progress| progress.have_envelopes = true);
+    }
+
+    /// Take every parked envelope the signed log now justifies into `keys`.
+    ///
+    /// The epoch ceiling is the whole point. An envelope is an anonymous sealed
+    /// box, so "it unsealed" proves only that somebody who knew this device's
+    /// public kex key wrapped *something* to it — not that a member wrapped the
+    /// real space key. The membership log is the only authenticated statement
+    /// about which epochs exist, so an envelope above its ceiling is refused,
+    /// and one at or below it can at worst be a key we then fail to decrypt
+    /// with (loud) rather than one we encrypt under (silent).
+    ///
+    /// Returns the epochs refused outright, for the caller to report. Envelopes
+    /// merely *ahead* of the log are kept: the membership and envelope fetches
+    /// race, so a rotation's new key legitimately arrives before the `Remove`
+    /// op that authorises it, and this runs again when the log catches up.
+    fn absorb_parked_envelopes(&mut self, space_id: Uuid) -> Vec<u32> {
+        let identity = &self.identity;
+        let Some(space) = self.spaces.get_mut(&space_id) else {
+            return Vec::new();
+        };
+        // Nothing is authorised until the log itself has loaded; an empty
+        // membership would otherwise pin the ceiling at 0 and refuse the
+        // epoch-0 envelope of a perfectly ordinary join.
+        if space.membership.members.is_empty() {
+            return Vec::new();
+        }
+        let ceiling = space.authorised_epoch();
+        let mut refused = Vec::new();
+        let mut still_parked = Vec::new();
+        for envelope in std::mem::take(&mut space.parked_envelopes) {
+            if envelope.epoch > ceiling {
+                // Ahead of the log, not necessarily bogus: keep it until the
+                // log either catches up or the space is forgotten. Bounded by
+                // the epoch ceiling itself — a relay can only make us hold what
+                // it can also make us fetch.
+                if envelope.epoch <= ceiling.saturating_add(MAX_ENVELOPES_AHEAD) {
+                    still_parked.push(envelope);
+                } else {
+                    refused.push(envelope.epoch);
+                }
+                continue;
+            }
             if space.keys.contains_key(&envelope.epoch) {
                 continue;
             }
-            match crypto::unseal_space_key(&self.identity, &envelope.sealed_key) {
+            match crypto::unseal_space_key(identity, &envelope.sealed_key) {
                 Ok(key) => {
                     space.keys.insert(envelope.epoch, key);
                 }
@@ -1912,32 +2070,37 @@ impl Engine {
                 }
             }
         }
-        space.current_epoch = space.current_epoch.max(current_epoch);
-
-        self.retry_deferred_frames(space_id);
-        self.finish_join(space_id, |progress| progress.have_envelopes = true);
+        space.parked_envelopes = still_parked;
+        refused
     }
 
     /// Re-run every frame parked for a space, after the missing piece (space
     /// keys or membership log) has arrived. A frame that is still not usable
     /// goes back on the queue.
     fn retry_deferred_frames(&mut self, space_id: Uuid) {
-        let retriable: Vec<(Uuid, Vec<UpdateFrame>)> = self
+        let retriable: Vec<(Uuid, Vec<(u64, UpdateFrame)>)> = self
             .docs
             .iter_mut()
             .filter(|(_, d)| d.space_id == space_id && !d.deferred.is_empty())
             .map(|(id, d)| (*id, std::mem::take(&mut d.deferred)))
             .collect();
         for (doc_id, frames) in retriable {
-            for frame in frames {
-                self.retry_frame(doc_id, frame);
+            for (seq, frame) in frames {
+                self.retry_frame(doc_id, seq, frame);
             }
         }
     }
 
-    /// Like `apply_frame` but for already-sequenced frames (seq accounting
-    /// was done when the frame was first seen and queued).
-    fn retry_frame(&mut self, doc_id: Uuid, frame: UpdateFrame) {
+    /// Like `apply_frame`, for a frame that was parked before its sequence was
+    /// retired.
+    ///
+    /// Parking deliberately leaves `have_seq` behind the frame, so that a
+    /// resubscribe can ask for it again. That makes retiring the sequence *this*
+    /// function's job — skipping it pins the contiguous frontier below the first
+    /// deferred frame for the life of the doc, which re-downloads the same
+    /// backlog on every reconnect and stops the compaction threshold ever
+    /// firing.
+    fn retry_frame(&mut self, doc_id: Uuid, seq: u64, frame: UpdateFrame) {
         let Some(doc) = self.docs.get(&doc_id) else {
             return;
         };
@@ -1954,20 +2117,25 @@ impl Engine {
             self.warn_security(format!(
                 "doc {doc_id}: frame from a device with no write rights"
             ));
-            self.defer_frame(doc_id, frame);
+            self.defer_frame(doc_id, seq, frame);
             return;
         }
         let Some(key) = space.keys.get(&frame.epoch) else {
-            self.defer_frame(doc_id, frame);
+            self.defer_frame(doc_id, seq, frame);
             return;
         };
         match crypto::open_update(&frame, key, &space_id, &doc_id) {
             // Deferred (was undecryptable): no longer "live", so no caret jump.
-            Ok(plaintext) => self.emit(SyncEvent::DocBytes {
-                doc_id,
-                update: plaintext,
-                caret_author: None,
-            }),
+            Ok(plaintext) => {
+                self.note_seq(doc_id, seq);
+                self.emit(SyncEvent::DocBytes {
+                    doc_id,
+                    update: plaintext,
+                    caret_author: None,
+                });
+            }
+            // Leave the sequence un-retired, exactly as `apply_frame` does: a
+            // resync must still be able to ask for it.
             Err(err) => self.warn_security(format!("doc {doc_id}: retry decrypt: {err}")),
         }
     }
@@ -1986,6 +2154,7 @@ impl Engine {
                     keys: BTreeMap::new(),
                     current_epoch: 0,
                     membership: MembershipState::default(),
+                    parked_envelopes: Vec::new(),
                 });
                 space.current_epoch = space
                     .current_epoch
@@ -2004,6 +2173,17 @@ impl Engine {
                     space.membership = state;
                 }
                 self.membership_inflight.remove(&space_id);
+                // The log is what authorises an epoch, so a longer log may be
+                // exactly what an envelope held above the ceiling was waiting
+                // for. Absorb before retrying frames: a parked frame's epoch
+                // key may be in that batch.
+                let rejected = self.absorb_parked_envelopes(space_id);
+                for epoch in rejected {
+                    self.warn_security(format!(
+                        "space {space_id}: refused a key envelope for epoch {epoch}, \
+                         which the signed membership log does not authorise"
+                    ));
+                }
                 // The refreshed log may be exactly what a parked frame was
                 // waiting for — a member added after we joined.
                 self.retry_deferred_frames(space_id);

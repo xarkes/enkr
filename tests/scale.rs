@@ -800,6 +800,7 @@ async fn envelope_growth_under_epoch_churn() {
     let config = ServerConfig {
         gc_interval: Duration::from_millis(100),
         snapshot_retention: Duration::from_millis(0),
+        snapshot_settle: Duration::from_millis(0),
         snapshot_request_threshold: 4,
         ..ServerConfig::default()
     };
@@ -926,6 +927,7 @@ async fn storage_cost_per_note() {
     let config = ServerConfig {
         gc_interval: Duration::from_millis(100),
         snapshot_retention: Duration::from_millis(0),
+        snapshot_settle: Duration::from_millis(0),
         snapshot_request_threshold: 8,
         ..ServerConfig::default()
     };

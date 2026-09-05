@@ -351,8 +351,12 @@ impl Store for CountingStore {
     async fn ack_snapshot(&self, doc_id: &Uuid, covers_seq: u64) -> StoreResult<()> {
         self.inner.ack_snapshot(doc_id, covers_seq).await
     }
-    async fn gc_eligible(&self, created_before: i64) -> StoreResult<Vec<(Uuid, u64)>> {
-        self.inner.gc_eligible(created_before).await
+    async fn gc_eligible(
+        &self,
+        settled_before: i64,
+        unacked_before: i64,
+    ) -> StoreResult<Vec<(Uuid, u64)>> {
+        self.inner.gc_eligible(settled_before, unacked_before).await
     }
     async fn gc_updates_through(&self, doc_id: &Uuid, seq: u64) -> StoreResult<u64> {
         self.inner.gc_updates_through(doc_id, seq).await
