@@ -1661,7 +1661,6 @@ impl Engine {
     /// original — the loss made permanent by the victim's own signature.
     fn incorporate(&mut self, doc_id: Uuid, seq: u64, frame: &UpdateFrame) -> bool {
         let digest = crypto::update_frame_digest(frame);
-        let own = frame.author_identity == self.identity.identity_pk();
         let Some(doc) = self.docs.get_mut(&doc_id) else {
             return false;
         };
@@ -1670,28 +1669,18 @@ impl Engine {
             // a `Resync` that rewound the frontier). Nothing to say.
             Some(first) if first == seq => {}
             Some(first) => {
-                // Whatever the cause, this replica can no longer prove it holds
-                // what its frontier claims, so it must stop offering snapshots.
+                // The relay stores a frame at exactly one sequence — it dedups
+                // on the frame's own bytes, so even a reconnect re-pushing an
+                // unacknowledged frame gets the original seq back. There is
+                // therefore no honest way for one frame to arrive under two, and
+                // no reason to guess at which of them we are missing: refuse the
+                // second, and let a resubscribe ask for the real content again.
                 doc.coverage_unverifiable = true;
-                if own {
-                    // Ours, and we re-push unacked frames on reconnect: if the
-                    // relay restarted, its in-memory push dedup went with it and
-                    // the retry appended a second copy. Harmless in itself —
-                    // applying it twice is a no-op — so the seq is still retired
-                    // and sync carries on.
-                    log::debug!(
-                        "doc {doc_id}: own frame from seq {first} stored again as seq {seq}"
-                    );
-                } else {
-                    // Not ours, and we have no way to produce someone else's
-                    // frame a second time. Leaving the seq un-retired is what
-                    // lets a resubscribe ask for the real content again.
-                    self.warn_security(format!(
-                        "doc {doc_id}: relay served the frame from seq {first} again as \
-                         seq {seq}; refusing to retire a sequence it has not supplied"
-                    ));
-                    return false;
-                }
+                self.warn_security(format!(
+                    "doc {doc_id}: relay served the frame from seq {first} again as \
+                     seq {seq}; refusing to retire a sequence it has not supplied"
+                ));
+                return false;
             }
             None => {
                 if doc.applied_digests.len() < MAX_TRACKED_FRAME_DIGESTS {

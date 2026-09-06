@@ -313,10 +313,11 @@ impl Store for HostileStore {
         &self,
         doc_id: &Uuid,
         frame: &[u8],
+        digest: &[u8; 32],
         epoch: u32,
         now: i64,
     ) -> Result<u64> {
-        self.inner.append_update(doc_id, frame, epoch, now).await
+        self.inner.append_update(doc_id, frame, digest, epoch, now).await
     }
 
     async fn updates_since(

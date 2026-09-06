@@ -2048,6 +2048,101 @@ async fn a_frame_replayed_under_another_seq_does_not_advance_the_frontier() {
     );
 }
 
+/// The relay must never store one frame twice, and a peer must not stall if it
+/// somehow does.
+///
+/// A client re-pushes unacknowledged frames on reconnect, so if the relay's
+/// retry dedup is not durable, a restart makes it append a second copy of a
+/// frame it already holds. That is entirely benign in itself — applying an
+/// update twice is a no-op — but it is indistinguishable, to every *other*
+/// member, from a relay hiding a sequence and covering it with a frame it had
+/// already served. A peer that refuses the duplicate stalls its frontier
+/// forever; one that accepts it cannot tell the honest case from the attack.
+/// The way out is for the duplicate never to exist: dedup on content, so the
+/// relay stores a given frame at exactly one sequence whatever it is asked.
+#[tokio::test]
+async fn the_relay_stores_a_repeated_frame_at_one_sequence() {
+    use enkr_proto::crypto::Identity;
+    use enkr_proto::membership::{MembershipOp, MembershipOpKind, sign_op};
+    use enkr_proto::wire::{ClientMsg, ServerMsg};
+    use enkr_proto::{crypto, wire};
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let server = TestServer::start_default().await;
+    let dev = Identity::generate();
+    let url = server.url();
+    let mut ws = raw_conn(&url, &dev).await;
+
+    let space = Uuid::new_v4();
+    let doc = Uuid::new_v4();
+    let key = crypto::SpaceKey::generate();
+    let create = sign_op(
+        &dev,
+        &MembershipOp {
+            space_id: space,
+            op_seq: 0,
+            kind: MembershipOpKind::Create {
+                creator_kex: dev.kex_pk(),
+                key_commitment: crypto::space_key_commitment(&space, 0, &key),
+            },
+        },
+    )
+    .unwrap();
+    for msg in [
+        ClientMsg::CreateSpace {
+            space_id: space,
+            signed_op: create,
+            envelopes: vec![],
+        },
+        ClientMsg::CreateDoc {
+            space_id: space,
+            doc_id: doc,
+        },
+    ] {
+        ws.send(Message::Binary(wire::encode(&msg).unwrap().into()))
+            .await
+            .unwrap();
+    }
+
+    // The same frame pushed under two different tags — the shape a reconnect
+    // produces once the relay's in-memory tag dedup has been lost to a restart.
+    let frame = crypto::seal_update(&dev, &key, &space, &doc, 0, b"exactly once");
+    let mut seqs = Vec::new();
+    for tag in [1u64, 2u64] {
+        ws.send(Message::Binary(
+            wire::encode(&ClientMsg::PushUpdate {
+                doc_id: doc,
+                client_tag: tag,
+                frame: frame.clone(),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        match recv_msg(&mut ws).await {
+            ServerMsg::Ack { seq, .. } => seqs.push(seq),
+            other => panic!("expected Ack, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        seqs[0], seqs[1],
+        "the relay stored one frame at two sequences ({seqs:?}); every other \
+         member now sees what is indistinguishable from a hidden update"
+    );
+
+    let rows: i64 = server
+        .raw_db()
+        .query_row(
+            "SELECT COUNT(*) FROM updates WHERE doc_id = ?",
+            [&doc.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "the frame was stored more than once");
+}
+
 /// A frame parked for a later retry must still retire its sequence.
 ///
 /// Deferral is routine — neither adding a member nor promoting one bumps the
