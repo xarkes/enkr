@@ -50,6 +50,10 @@ pub struct Hostility {
     pub forge_envelope_epoch: AtomicU64,
     /// Who the forged envelope is sealed to (the victim's public kex key).
     pub forge_envelope_recipient: std::sync::Mutex<Option<[u8; 32]>>,
+    /// Serve this membership log instead of the real one. `Create` is
+    /// self-signed, so an attacker can mint a wholly valid log for a space they
+    /// have nothing to do with — the substitution a client must refuse.
+    pub substitute_membership_log: std::sync::Mutex<Option<Vec<Vec<u8>>>>,
 }
 
 impl Hostility {
@@ -71,6 +75,10 @@ impl Hostility {
 
     pub fn replay_update_once_as(&self, seq: u64) {
         self.replay_update_as_seq.store(seq, Ordering::Relaxed);
+    }
+
+    pub fn substitute_membership_log(&self, ops: Vec<Vec<u8>>) {
+        *self.substitute_membership_log.lock().unwrap() = Some(ops);
     }
 
     pub fn forge_envelope_for_epoch(&self, epoch: u32, recipient_kex: [u8; 32]) {
@@ -219,6 +227,9 @@ impl Store for HostileStore {
     }
 
     async fn membership_log(&self, space_id: &Uuid) -> Result<Vec<Vec<u8>>> {
+        if let Some(ops) = self.hostility.substitute_membership_log.lock().unwrap().clone() {
+            return Ok(ops);
+        }
         let mut ops = self.inner.membership_log(space_id).await?;
         let suppress = self
             .hostility

@@ -192,6 +192,22 @@ struct SpaceState {
     /// rotated key legitimately turns up before the `Remove` op that authorises
     /// it. Re-checked against the log every time it grows.
     parked_envelopes: Vec<wire::Envelope>,
+    /// How many membership ops the relay has actually served, and the digest of
+    /// exactly those ops.
+    ///
+    /// The membership log is the client-side trust root and `Create` is
+    /// self-signed, so any identity can mint a syntactically perfect log for any
+    /// space id. Length alone therefore says nothing about whether a served log
+    /// is *ours*. Recording what we already accepted is what lets the next
+    /// response be checked as an extension of it rather than a replacement for
+    /// it.
+    ///
+    /// Deliberately the served prefix, not our local `next_op_seq`: this client
+    /// applies its own ops optimistically before the relay has persisted them,
+    /// and holding those against the relay would read an ordinary race as an
+    /// attack.
+    confirmed_ops: usize,
+    confirmed_digest: [u8; 32],
 }
 
 impl SpaceState {
@@ -1091,6 +1107,8 @@ impl Engine {
                 current_epoch: 0,
                 membership: membership_state,
                 parked_envelopes: Vec::new(),
+                confirmed_ops: 0,
+                confirmed_digest: [0u8; 32],
             },
         );
 
@@ -1999,6 +2017,8 @@ impl Engine {
             current_epoch: 0,
             membership: MembershipState::default(),
             parked_envelopes: Vec::new(),
+            confirmed_ops: 0,
+            confirmed_digest: [0u8; 32],
         });
         let room = MAX_PARKED_ENVELOPES.saturating_sub(space.parked_envelopes.len());
         space.parked_envelopes.extend(envelopes.into_iter().take(room));
@@ -2164,6 +2184,37 @@ impl Engine {
         current_epoch: u32,
         ops: Vec<wire::SignedMembershipOp>,
     ) {
+        // The served log has to be the one we already verified, extended — never
+        // a different history that merely happens to be as long. `Create` is
+        // self-signed, so an attacker can mint a perfectly valid one-op log for
+        // this space id; a length comparison would accept it and hand them the
+        // space. Checked before anything is replayed or adopted.
+        if let Some(space) = self.spaces.get(&space_id)
+            && space.confirmed_ops > 0
+        {
+            let confirmed = space.confirmed_ops;
+            if ops.len() < confirmed {
+                self.reject_membership(
+                    space_id,
+                    format!(
+                        "relay served {} membership ops after already serving {confirmed}; \
+                         a log cannot shrink",
+                        ops.len()
+                    ),
+                );
+                return;
+            }
+            if crypto::membership_log_digest(&ops[..confirmed]) != space.confirmed_digest {
+                self.reject_membership(
+                    space_id,
+                    "relay served a membership log that is not an extension of the one \
+                     already verified for this space"
+                        .to_string(),
+                );
+                return;
+            }
+        }
+
         // The signed log is the trust root — replay it fully; the server's
         // current_epoch is just a hint for key fetching.
         match MembershipState::replay(&space_id, &ops) {
@@ -2173,6 +2224,8 @@ impl Engine {
                     current_epoch: 0,
                     membership: MembershipState::default(),
                     parked_envelopes: Vec::new(),
+                    confirmed_ops: 0,
+                    confirmed_digest: [0u8; 32],
                 });
                 space.current_epoch = space
                     .current_epoch
@@ -2190,6 +2243,11 @@ impl Engine {
                 if state.next_op_seq >= space.membership.next_op_seq {
                     space.membership = state;
                 }
+                // Recorded whether or not it replaced our state: the relay did
+                // serve these ops and they did verify, so every later response
+                // must still agree with them.
+                space.confirmed_ops = ops.len();
+                space.confirmed_digest = crypto::membership_log_digest(&ops);
                 self.membership_inflight.remove(&space_id);
                 // The log is what authorises an epoch, so a longer log may be
                 // exactly what an envelope held above the ceiling was waiting
@@ -2208,16 +2266,23 @@ impl Engine {
                 self.finish_join(space_id, |progress| progress.have_membership = true);
             }
             Err(err) => {
-                self.membership_inflight.remove(&space_id);
-                self.warn_security(format!("space {space_id}: membership log invalid: {err}"));
-                // A poisoned log fails the join.
-                if let Some(progress) = self.joins.remove(&space_id) {
-                    for waiter in progress.waiters {
-                        let _ = waiter.send(Err(SyncError::Other(format!(
-                            "membership verification failed: {err}"
-                        ))));
-                    }
-                }
+                self.reject_membership(space_id, format!("membership log invalid: {err}"));
+            }
+        }
+    }
+
+    /// Refuse a membership response outright, leaving the verified state alone.
+    ///
+    /// Shared by the two ways a response can be untrustworthy — it fails to
+    /// replay, or it replays fine but describes a different history than the one
+    /// already confirmed. Both mean the relay cannot be believed about this
+    /// space, so neither may quietly leave a join hanging.
+    fn reject_membership(&mut self, space_id: Uuid, reason: String) {
+        self.membership_inflight.remove(&space_id);
+        self.warn_security(format!("space {space_id}: {reason}"));
+        if let Some(progress) = self.joins.remove(&space_id) {
+            for waiter in progress.waiters {
+                let _ = waiter.send(Err(SyncError::Other(reason.clone())));
             }
         }
     }

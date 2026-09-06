@@ -1654,6 +1654,112 @@ async fn a_forged_current_epoch_envelope_is_refused_not_adopted() {
     assert!(text.contains("before;"), "owner lost its own content: {text:?}");
 }
 
+/// A relay cannot replace a verified membership log with a different one.
+///
+/// The log is the client-side trust root, and its first op is *self-signed*
+/// (TOFU) — so any identity can mint a syntactically perfect log for any space
+/// id. A guard that compares lengths therefore proves nothing: a forged log of
+/// equal length passes it and is adopted wholesale, after which the attacker is
+/// the owner and the real member is not a member at all. The client has to
+/// check that what it is served *extends* what it already verified.
+#[tokio::test]
+async fn a_substituted_membership_log_is_refused() {
+    use enkr_proto::crypto::Identity;
+    use enkr_proto::membership::{self, MembershipOp, MembershipOpKind};
+    use enkr_proto::wire;
+
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "before;").await.unwrap();
+    owner.flush().await.unwrap();
+
+    let victim = server.client();
+    wait_connected(&victim).await;
+    invite_and_join(&owner, &victim, space).await;
+    victim.open_doc(space, doc).await.unwrap();
+    converge(&[&owner, &victim], doc).await;
+
+    // A third member, so that something can arrive from a device the victim's
+    // log does not know about — an `Add` bumps no epoch, so the victim has had
+    // no reason to refetch since it joined. A frame it cannot attribute is what
+    // makes it ask for the log again, and a lying relay's moment is the answer.
+    let extra = server.client();
+    wait_connected(&extra).await;
+    invite_and_join(&owner, &extra, space).await;
+    extra.open_doc(space, doc).await.unwrap();
+
+    // The forged log: the attacker's own space, with the victim added as a
+    // reader so nothing about it looks broken. Two ops, so it is no shorter
+    // than the prefix the victim already confirmed — length is exactly what a
+    // guard must not rely on.
+    let attacker = Identity::generate();
+    let sign = |seq, kind| {
+        let op = MembershipOp {
+            space_id: space,
+            op_seq: seq,
+            kind,
+        };
+        wire::encode(&membership::sign_op(&attacker, &op).unwrap()).unwrap()
+    };
+    let forged = vec![
+        sign(
+            0,
+            MembershipOpKind::Create {
+                creator_kex: attacker.kex_pk(),
+                key_commitment: [0u8; 32],
+            },
+        ),
+        sign(
+            1,
+            MembershipOpKind::Add {
+                identity_pk: victim.identity_pk(),
+                kex_pk: victim.kex_pk(),
+                role: MemberRole::Reader,
+            },
+        ),
+    ];
+
+    // Armed only now: the relay's own `RemoveMember` validation reads the log
+    // through the same store method, so substituting earlier would break the
+    // ordinary paths this test depends on rather than the one it is probing.
+    hostility.substitute_membership_log(forged);
+    let mut warnings = victim.events();
+    extra.insert_text(doc, 0, "extra;").await.unwrap();
+    extra.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // The victim's view of who owns this space must be untouched.
+    let members = victim.list_members(space).await.unwrap();
+    assert!(
+        members
+            .iter()
+            .any(|m| m.identity_pk == owner.identity_pk() && m.role == MemberRole::Owner),
+        "the real owner was displaced by the forged log"
+    );
+    assert!(
+        !members
+            .iter()
+            .any(|m| m.identity_pk == attacker.identity_pk()),
+        "the attacker was adopted into the space"
+    );
+    assert!(
+        members
+            .iter()
+            .any(|m| m.identity_pk == victim.identity_pk()),
+        "the victim was written out of its own space"
+    );
+
+    let mut warned = false;
+    while let Ok(event) = warnings.try_recv() {
+        warned |= matches!(event, SyncEvent::SecurityWarning { .. });
+    }
+    assert!(warned, "a substituted log was refused without telling anyone");
+}
+
 /// A frame parked for a later retry must still retire its sequence.
 ///
 /// Deferral is routine — neither adding a member nor promoting one bumps the
