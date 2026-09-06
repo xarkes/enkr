@@ -863,6 +863,69 @@ async fn a_device_cannot_open_unbounded_connections() {
     let _ = std::fs::remove_file(&key);
 }
 
+/// A socket that connects and never speaks must not hold a slot.
+///
+/// `client_timeout` governs the main loop, which a connection only reaches once
+/// `Auth` has verified. The handshake reads had no deadline at all, so a peer
+/// that opened a socket and said nothing held a task, a send queue and — the
+/// part that matters — one of `max_connections_total`, indefinitely. Sockets are
+/// free to open and cost nothing to keep, and this is the one place on the relay
+/// where the peer has proved nothing whatsoever, so it is the cheapest possible
+/// way to take the whole thing down.
+#[tokio::test]
+#[ignore = "resilience"]
+async fn silent_unauthenticated_sockets_do_not_hold_slots() {
+    use futures_util::StreamExt;
+
+    const CAP: usize = 2;
+    let config = ServerConfig {
+        max_connections_total: CAP,
+        // Long enough that the *post-auth* timeout cannot be what reclaims
+        // these: only the handshake budget can.
+        client_timeout: Duration::from_secs(600),
+        handshake_timeout: Duration::from_millis(300),
+        ..ServerConfig::default()
+    };
+    let server = TestServer::start(config).await;
+
+    // Fill every slot with sockets that connect and then say nothing at all.
+    let mut squatters = Vec::new();
+    for _ in 0..CAP {
+        let (ws, _) = tokio_tungstenite::connect_async(server.url())
+            .await
+            .expect("raw connect");
+        squatters.push(ws);
+    }
+    let deadline = Instant::now() + NOTICE_BUDGET;
+    while server.live_connections() as usize != CAP {
+        assert!(Instant::now() < deadline, "the relay never counted the squatters");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The handshake budget must reclaim them without either side saying a word.
+    let started = Instant::now();
+    while server.live_connections() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "relay still holds {} silent unauthenticated connection(s) after {:?}",
+            server.live_connections(),
+            started.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // And the slots really are usable again: a genuine client gets in.
+    let client = server.client();
+    wait_connected(&client).await;
+    let space = client.create_space().await.expect("create space");
+    let doc = client.create_doc(space).await.expect("create doc");
+    converge(&[&client], doc).await;
+
+    for mut ws in squatters {
+        let _ = ws.next().await;
+    }
+}
+
 /// Quitting must end the connection with a WebSocket closing handshake.
 ///
 /// A client that simply vanishes is indistinguishable from one that crashed:
