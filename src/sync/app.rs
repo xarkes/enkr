@@ -894,6 +894,16 @@ impl AppSync {
         self.joining.remove(&remote);
         self.members.remove(&remote);
         self.members_refreshing.remove(&remote);
+        // The peek is bookkeeping about a space we no longer hold, so it goes
+        // with the rest of it. `peeked` is a once-only latch, and the name it
+        // yields is only recorded when there is *no* local mirror — so a space
+        // that was peeked while it was still mirrored leaves the latch set and
+        // `remote_names` empty. Left behind, that pair is unrecoverable: every
+        // later peek returns at the latch, nothing re-fetches the index, and the
+        // sync window lists the space as a bare uuid for the rest of the
+        // session. Clearing both is what lets the next peek actually run.
+        self.peeked.remove(&remote);
+        self.remote_names.remove(&remote);
     }
 
     /// Sever a space's sync link while keeping every local note: detach each

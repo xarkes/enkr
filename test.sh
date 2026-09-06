@@ -28,7 +28,7 @@
 #   ./test.sh cdp          browser-backed ::cdp driver tests (SEE "Known broken")
 #   ./test.sh -h
 #
-# Known broken / flaky, as of the last audit — the summary reminds you of both:
+# Known broken:
 #
 #   * `cdp` is excluded from the default run and currently fails 12/12. mae
 #     commit a793f3b removed the DOM backend (`IMUI::new_dom` / `run_dom`), but
@@ -36,10 +36,6 @@
 #     harness the CdpDriver needs will not compile. The same call sites break
 #     the wasm32/web build of the app itself.
 #
-#   * app_sync::a_remote_space_shows_its_name_before_being_synced is flaky,
-#     roughly 1-2 runs in 5, independent of any recent change (it fails the same
-#     way on older commits). It is bimodal: a 0.3s pass or a 20s pump_until
-#     timeout. If e2e fails ONLY on that test, re-run before investigating.
 
 set -uo pipefail
 
@@ -143,9 +139,9 @@ for i in "${!RESULT_NAMES[@]}"; do
 done
 
 if [[ $FAILED -ne 0 ]]; then
-  printf '\n%sSomething failed.%s Before digging in, check the two known issues in\n' "$RED" "$OFF"
-  printf 'this script'\''s header: the cdp suite is broken outright, and the e2e test\n'
-  printf 'a_remote_space_shows_its_name_before_being_synced is flaky ~1-2 runs in 5.\n'
+  printf '\n%sSomething failed.%s The cdp suite is broken outright (see this\n' "$RED" "$OFF"
+  printf 'script'\''s header); nothing else here is known to fail, so treat anything\n'
+  printf 'else as a real regression rather than re-running it.\n'
   exit 1
 fi
 
