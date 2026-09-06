@@ -415,60 +415,6 @@ async fn dumb_server_stores_and_relays_random_bytes() {
 
     let server = TestServer::start_default().await;
 
-    async fn raw_conn(
-        url: &str,
-        dev: &Identity,
-    ) -> impl futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
-    + futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-    + Unpin {
-        let (mut ws, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .expect("connect");
-        let hello = ClientMsg::Hello {
-            identity_pk: dev.identity_pk(),
-            kex_pk: dev.kex_pk(),
-            protocol_version: PROTOCOL_VERSION,
-        };
-        ws.send(Message::Binary(wire::encode(&hello).unwrap().into()))
-            .await
-            .unwrap();
-        let challenge = recv_msg(&mut ws).await;
-        let ServerMsg::Challenge { nonce, server_id } = challenge else {
-            panic!("expected challenge, got {challenge:?}");
-        };
-        let sig = dev.sign(&crypto::auth_signing_bytes(&nonce, &server_id));
-        ws.send(Message::Binary(
-            wire::encode(&ClientMsg::Auth {
-                sig: sig.to_vec(),
-                account_token: None,
-            })
-            .unwrap()
-            .into(),
-        ))
-        .await
-        .unwrap();
-        let ok = recv_msg(&mut ws).await;
-        assert!(matches!(ok, ServerMsg::AuthOk { .. }), "got {ok:?}");
-        ws
-    }
-
-    async fn recv_msg<S>(ws: &mut S) -> ServerMsg
-    where
-        S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-            + Unpin,
-    {
-        loop {
-            let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
-                .await
-                .expect("server reply timeout")
-                .expect("stream open")
-                .expect("ws ok");
-            if let Message::Binary(bytes) = msg {
-                return wire::decode::<ServerMsg>(&bytes).expect("decodable");
-            }
-        }
-    }
-
     let dev = Identity::generate();
     let url = server.url();
     let mut ws = raw_conn(&url, &dev).await;
@@ -595,6 +541,86 @@ async fn dumb_server_stores_and_relays_random_bytes() {
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, 1);
     assert_eq!(frames[0].1, frame, "noise must round-trip bit-identical");
+}
+
+// -- raw relay access -------------------------------------------------------
+//
+// Shared by the tests that must put something on the wire no real client would
+// produce — noise frames, an unsigned snapshot. Module level rather than nested
+// in one test, because there is more than one such test now.
+
+/// An authenticated raw WebSocket to the relay.
+async fn raw_conn(
+    url: &str,
+    dev: &enkr_proto::crypto::Identity,
+) -> impl futures_util::Sink<
+    tokio_tungstenite::tungstenite::Message,
+    Error = tokio_tungstenite::tungstenite::Error,
+> + futures_util::Stream<
+    Item = Result<
+        tokio_tungstenite::tungstenite::Message,
+        tokio_tungstenite::tungstenite::Error,
+    >,
+> + Unpin {
+    use enkr_proto::wire::{ClientMsg, ServerMsg};
+    use enkr_proto::{PROTOCOL_VERSION, crypto, wire};
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect");
+    let hello = ClientMsg::Hello {
+        identity_pk: dev.identity_pk(),
+        kex_pk: dev.kex_pk(),
+        protocol_version: PROTOCOL_VERSION,
+    };
+    ws.send(Message::Binary(wire::encode(&hello).unwrap().into()))
+        .await
+        .unwrap();
+    let challenge = recv_msg(&mut ws).await;
+    let ServerMsg::Challenge { nonce, server_id } = challenge else {
+        panic!("expected challenge, got {challenge:?}");
+    };
+    let sig = dev.sign(&crypto::auth_signing_bytes(&nonce, &server_id));
+    ws.send(Message::Binary(
+        wire::encode(&ClientMsg::Auth {
+            sig: sig.to_vec(),
+            account_token: None,
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let ok = recv_msg(&mut ws).await;
+    assert!(matches!(ok, ServerMsg::AuthOk { .. }), "got {ok:?}");
+    ws
+}
+
+/// Next decodable `ServerMsg`, skipping non-binary frames.
+async fn recv_msg<S>(ws: &mut S) -> enkr_proto::wire::ServerMsg
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("server reply timeout")
+            .expect("stream open")
+            .expect("ws ok");
+        if let Message::Binary(bytes) = msg {
+            return enkr_proto::wire::decode::<enkr_proto::wire::ServerMsg>(&bytes)
+                .expect("decodable");
+        }
+    }
 }
 
 /// The server's entire database must contain zero plaintext.
@@ -1267,6 +1293,137 @@ async fn forged_snapshot_metadata_cannot_wedge_a_doc() {
         text.contains("after;"),
         "forged metadata wedged the document: {text:?}"
     );
+}
+
+/// The relay must refuse a snapshot it cannot authenticate.
+///
+/// This is the one client-supplied object the relay *acts* on: storing a
+/// snapshot is what lets the GC delete every update it claims to cover. An
+/// unauthenticated snapshot is therefore an unauthenticated instruction to
+/// destroy history — so unlike an update frame, whose signature the relay is
+/// deliberately ignorant of (see `dumb_server_stores_and_relays_random_bytes`),
+/// this one has to be checked. It is keyless: the signature covers framing the
+/// relay already reads, and the verifying key is in the frame.
+#[tokio::test]
+async fn an_unsigned_snapshot_is_refused_and_history_survives() {
+    use enkr_proto::wire::{ClientMsg, ErrorCode, ServerMsg, SubscribeEntry};
+    use enkr_proto::{crypto, wire};
+    use enkr_proto::crypto::Identity;
+    use enkr_proto::membership::{MembershipOp, MembershipOpKind, sign_op};
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let server = TestServer::start_default().await;
+    let dev = Identity::generate();
+    // Bound rather than inlined: edition 2024 has `impl Trait` capture every
+    // lifetime in scope, so a temporary `String` here would be borrowed for as
+    // long as the socket.
+    let url = server.url();
+    let mut ws = raw_conn(&url, &dev).await;
+
+    let space = Uuid::new_v4();
+    let doc = Uuid::new_v4();
+    let key = crypto::SpaceKey::generate();
+    let create = sign_op(
+        &dev,
+        &MembershipOp {
+            space_id: space,
+            op_seq: 0,
+            kind: MembershipOpKind::Create {
+                creator_kex: dev.kex_pk(),
+                key_commitment: crypto::space_key_commitment(&space, 0, &key),
+            },
+        },
+    )
+    .unwrap();
+    for msg in [
+        ClientMsg::CreateSpace {
+            space_id: space,
+            signed_op: create,
+            envelopes: vec![],
+        },
+        ClientMsg::CreateDoc {
+            space_id: space,
+            doc_id: doc,
+        },
+        ClientMsg::PushUpdate {
+            doc_id: doc,
+            client_tag: 1,
+            frame: crypto::seal_update(&dev, &key, &space, &doc, 0, b"irreplaceable history"),
+        },
+    ] {
+        ws.send(Message::Binary(wire::encode(&msg).unwrap().into()))
+            .await
+            .unwrap();
+    }
+    assert!(matches!(recv_msg(&mut ws).await, ServerMsg::Ack { seq: 1, .. }));
+
+    // A snapshot that is otherwise perfect — right author, right doc, coverage
+    // the relay can check — but carries no signature.
+    let mut snapshot = crypto::seal_snapshot(&dev, &key, &space, &doc, 1, 0, b"replaces everything");
+    snapshot.sig.clear();
+    ws.send(Message::Binary(
+        wire::encode(&ClientMsg::PutSnapshot { snapshot })
+            .unwrap()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    // `PutSnapshot` has no acknowledgement of its own, so a refusal and a
+    // silent acceptance both look like "nothing arrives". Ping behind it and
+    // read up to the Pong: that distinguishes them without a timeout deciding
+    // the outcome, and makes a regression report the real assertion rather
+    // than "server reply timeout".
+    ws.send(Message::Binary(
+        wire::encode(&ClientMsg::Ping).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+    let mut refused = false;
+    loop {
+        match recv_msg(&mut ws).await {
+            ServerMsg::Error {
+                code: ErrorCode::BadSignature,
+                ..
+            } => refused = true,
+            ServerMsg::Pong => break,
+            other => panic!("unexpected reply while awaiting the barrier: {other:?}"),
+        }
+    }
+    assert!(
+        refused,
+        "the relay accepted a snapshot carrying no signature"
+    );
+
+    // Nothing was stored, so there is nothing for the GC to compact behind, and
+    // the history is still served.
+    let snapshots: i64 = server
+        .raw_db()
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE doc_id = ?",
+            [&doc.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(snapshots, 0, "an unsigned snapshot reached storage");
+
+    ws.send(Message::Binary(
+        wire::encode(&ClientMsg::Subscribe {
+            entries: vec![SubscribeEntry {
+                doc_id: doc,
+                have_seq: 0,
+            }],
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let backlog = recv_msg(&mut ws).await;
+    let ServerMsg::Backlog { frames, .. } = backlog else {
+        panic!("expected Backlog, got {backlog:?}");
+    };
+    assert_eq!(frames.len(), 1, "the history behind the snapshot was lost");
 }
 
 /// The flip side of the gate above: it keys on whether a device could *ever*
