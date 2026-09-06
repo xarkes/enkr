@@ -482,6 +482,10 @@ async fn dumb_server_stores_and_relays_random_bytes() {
         op_seq: 0,
         kind: MembershipOpKind::Create {
             creator_kex: dev.kex_pk(),
+            // This space is never opened by a real client — the point is that
+            // the relay stores and relays opaque noise — so the commitment
+            // binds nothing anybody here will check.
+            key_commitment: [0u8; 32],
         },
     };
     let signed = sign_op(&dev, &op).unwrap();
@@ -1570,6 +1574,84 @@ async fn a_relay_forged_key_envelope_is_never_used_to_seal() {
         forged, 0,
         "a frame was sealed under the epoch the relay invented"
     );
+}
+
+/// The attack the epoch ceiling alone does not stop: a forged envelope for the
+/// space's **current** epoch.
+///
+/// A key envelope is an anonymous X25519 sealed box, so wrapping one needs
+/// nothing but the recipient's public kex key — which the relay stores, and
+/// which travels in the membership log. Bounding the *epoch* by the signed log
+/// does nothing here: a space that has never rotated is entirely at epoch 0, so
+/// the relay withholds the genuine epoch-0 envelope, substitutes one sealing a
+/// key of its own, and the victim encrypts everything under it. The signed
+/// key commitment is what makes the substitution detectable.
+#[tokio::test]
+async fn a_forged_current_epoch_envelope_is_refused_not_adopted() {
+    use enkr_proto::crypto::{self, SpaceKey};
+    use enkr_proto::wire::{self, UpdateFrame};
+    use harness::hostile::FORGED_SPACE_KEY;
+
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "before;").await.unwrap();
+    owner.flush().await.unwrap();
+    converge(&[&owner], doc).await;
+
+    // The space has never rotated, so epoch 0 *is* the current epoch — nothing
+    // about this envelope is out of range.
+    let victim = server.client();
+    wait_connected(&victim).await;
+    let warnings = victim.events();
+    hostility.forge_envelope_for_epoch(0, victim.kex_pk());
+    let _ = invite_and_join(&owner, &victim, space).await;
+    let _ = victim.open_doc(space, doc).await;
+
+    // Give the victim every chance to seal something under the forged key.
+    let _ = victim.insert_text(doc, 0, "victim;").await;
+    let _ = victim.flush().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The relay must hold nothing that key can open. Checked against the stored
+    // frames rather than the victim's outbox, because what matters is whether
+    // the attacker's key ever governs bytes that left the device.
+    let forged_key = SpaceKey(FORGED_SPACE_KEY);
+    let conn = server.raw_db();
+    let frames: Vec<Vec<u8>> = {
+        let mut stmt = conn.prepare("SELECT frame FROM updates").unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows
+    };
+    assert!(!frames.is_empty(), "no updates were stored at all");
+    for bytes in &frames {
+        let frame: UpdateFrame = wire::decode(bytes).unwrap();
+        assert!(
+            crypto::open_update(&frame, &forged_key, &space, &frame.doc_id).is_err(),
+            "an update was sealed under the key the relay chose"
+        );
+    }
+
+    // Refusing must also be *loud*. A device that cannot obtain a real key has
+    // to look different from one that simply has nothing to say, or the user
+    // sees a space that quietly never syncs.
+    let mut warnings = warnings;
+    let mut warned = false;
+    while let Ok(event) = warnings.try_recv() {
+        warned |= matches!(event, SyncEvent::SecurityWarning { .. });
+    }
+    assert!(warned, "the forged envelope was refused without telling anyone");
+
+    // The owner's own history is untouched by any of this.
+    let text = owner.doc_text(doc).await.unwrap();
+    assert!(text.contains("before;"), "owner lost its own content: {text:?}");
 }
 
 /// A frame parked for a later retry must still retire its sequence.

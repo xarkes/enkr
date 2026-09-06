@@ -43,7 +43,10 @@ pub struct Hostility {
     ///
     /// A sealed box is anonymous — wrapping one needs only the recipient's
     /// public kex key, which the relay has — so this needs no stolen secret
-    /// and no cooperating member. `0` disables it.
+    /// and no cooperating member. Stored as `epoch + 1` so that `0` can mean
+    /// "off" while still allowing epoch **0** to be forged — which is the case
+    /// that matters, since a space that has never rotated is entirely at
+    /// epoch 0 and an attack there needs no invented epoch at all.
     pub forge_envelope_epoch: AtomicU64,
     /// Who the forged envelope is sealed to (the victim's public kex key).
     pub forge_envelope_recipient: std::sync::Mutex<Option<[u8; 32]>>,
@@ -73,7 +76,7 @@ impl Hostility {
     pub fn forge_envelope_for_epoch(&self, epoch: u32, recipient_kex: [u8; 32]) {
         *self.forge_envelope_recipient.lock().unwrap() = Some(recipient_kex);
         self.forge_envelope_epoch
-            .store(epoch as u64, Ordering::Relaxed);
+            .store(epoch as u64 + 1, Ordering::Relaxed);
     }
 }
 
@@ -231,8 +234,15 @@ impl Store for HostileStore {
         identity_pk: &IdentityPk,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
         let mut envelopes = self.inner.envelopes_for_identity(space_id, identity_pk).await?;
-        let forged = self.hostility.forge_envelope_epoch.load(Ordering::Relaxed);
-        if forged > 0 {
+        let forged = match self.hostility.forge_envelope_epoch.load(Ordering::Relaxed) {
+            0 => return Ok(envelopes),
+            stored => (stored - 1) as u32,
+        };
+        {
+            // Replace, not append: a relay that wants a device to adopt its key
+            // simply withholds the genuine envelope for that epoch. Appending
+            // would only ever test the tie-break.
+            envelopes.retain(|(epoch, _)| *epoch != forged);
             // The relay knows every member's public kex key (it stores them and
             // they travel in the membership log), and sealing needs nothing
             // else. So it can offer any device a key of its choosing for any
@@ -244,7 +254,7 @@ impl Store for HostileStore {
                 &kex_pk,
                 &enkr_proto::crypto::SpaceKey(FORGED_SPACE_KEY),
             );
-            envelopes.push((forged as u32, sealed));
+            envelopes.push((forged, sealed));
         }
         Ok(envelopes)
     }

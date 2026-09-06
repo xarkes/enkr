@@ -1069,6 +1069,7 @@ impl Engine {
             op_seq: 0,
             kind: MembershipOpKind::Create {
                 creator_kex: self.identity.kex_pk(),
+                key_commitment: crypto::space_key_commitment(&space_id, 0, &key),
             },
         };
         let signed = membership::sign_op(&self.identity, &op)
@@ -1259,6 +1260,7 @@ impl Engine {
             kind: MembershipOpKind::Remove {
                 identity_pk,
                 new_epoch,
+                key_commitment: crypto::space_key_commitment(&space_id, new_epoch, &new_key),
             },
         };
         let signed = membership::sign_op(&self.identity, &op)
@@ -2008,8 +2010,9 @@ impl Engine {
         let rejected = self.absorb_parked_envelopes(space_id);
         for epoch in rejected {
             self.warn_security(format!(
-                "space {space_id}: refused a key envelope for epoch {epoch}, \
-                 which the signed membership log does not authorise"
+                "space {space_id}: refused a key envelope for epoch {epoch} — \
+                 the signed membership log does not authorise that epoch, or the \
+                 key does not match the commitment the log records for it"
             ));
         }
 
@@ -2061,14 +2064,29 @@ impl Engine {
             if space.keys.contains_key(&envelope.epoch) {
                 continue;
             }
-            match crypto::unseal_space_key(identity, &envelope.sealed_key) {
-                Ok(key) => {
-                    space.keys.insert(envelope.epoch, key);
-                }
-                Err(err) => {
-                    log::warn!("envelope unseal failed (epoch {}): {err}", envelope.epoch)
-                }
+            // No commitment yet means the log has not reached the op that
+            // created this epoch. Hold the envelope rather than trusting it:
+            // "not yet checkable" must never read as "nothing to check".
+            let Some(commitment) = space.membership.key_commitment(envelope.epoch) else {
+                still_parked.push(envelope);
+                continue;
+            };
+            let Ok(key) = crypto::unseal_space_key(identity, &envelope.sealed_key) else {
+                log::warn!("envelope unseal failed (epoch {})", envelope.epoch);
+                continue;
+            };
+            // The check that makes an envelope trustworthy. Unsealing proves
+            // only that somebody who knew this device's *public* kex key
+            // wrapped 32 bytes to it — the relay knows that key, and so does
+            // anyone who has read the membership log. The commitment is signed
+            // by the owner who created the epoch, so it is the only statement
+            // about *which* key belongs here that an untrusted relay cannot
+            // manufacture.
+            if crypto::space_key_commitment(&space_id, envelope.epoch, &key) != commitment {
+                refused.push(envelope.epoch);
+                continue;
             }
+            space.keys.insert(envelope.epoch, key);
         }
         space.parked_envelopes = still_parked;
         refused
