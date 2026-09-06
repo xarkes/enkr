@@ -1986,6 +1986,68 @@ async fn a_client_without_the_rotated_key_seals_nothing() {
     );
 }
 
+/// A frame served twice must not retire a sequence the relay never sent.
+///
+/// The relay assigns sequence numbers after a client has sealed a frame, so
+/// nothing in the frame is bound to the seq it lands on — and nothing can be,
+/// since the author does not know it yet. A client that tracks what it holds by
+/// counting sequences rather than by content will therefore accept a frame it
+/// already has as the content of the *next* seq, advance its frontier over
+/// whatever really sat there, and go on to sign a snapshot covering it. The GC
+/// then deletes the original: content destroyed by the victim's own signature.
+#[tokio::test]
+async fn a_frame_replayed_under_another_seq_does_not_advance_the_frontier() {
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+
+    // Two real updates, so seq 2 exists and has content of its own.
+    owner.insert_text(doc, 0, "first;").await.unwrap();
+    owner.flush().await.unwrap();
+    owner.insert_text(doc, 0, "second;").await.unwrap();
+    owner.flush().await.unwrap();
+    converge(&[&owner], doc).await;
+
+    // A fresh member cold-syncs while the relay serves seq 1's frame a second
+    // time as seq 2, hiding the real one.
+    let joiner = server.client();
+    wait_connected(&joiner).await;
+    invite_and_join(&owner, &joiner, space).await;
+    hostility.substitute_update_seq(2);
+    let warnings = joiner.events();
+    joiner.open_doc(space, doc).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The frontier must not have moved over the sequence it was never sent.
+    let status = joiner.status().await.unwrap();
+    let have = status.have_seq.get(&doc).copied().unwrap_or(0);
+    assert!(
+        have < 2,
+        "frontier reached {have}: a replayed frame retired a seq whose content \
+         the relay withheld"
+    );
+
+    let mut warnings = warnings;
+    let mut warned = false;
+    while let Ok(event) = warnings.try_recv() {
+        warned |= matches!(event, SyncEvent::SecurityWarning { .. });
+    }
+    assert!(warned, "a replayed frame was refused without telling anyone");
+
+    // And it recovers: once the relay serves the real frame, a resubscribe
+    // picks it up and the joiner converges on the full document.
+    hostility.substitute_update_seq.store(0, std::sync::atomic::Ordering::Relaxed);
+    joiner.resync().unwrap();
+    let text = converge(&[&owner, &joiner], doc).await;
+    assert!(
+        text.contains("first;") && text.contains("second;"),
+        "the joiner never recovered the withheld update: {text:?}"
+    );
+}
+
 /// A frame parked for a later retry must still retire its sequence.
 ///
 /// Deferral is routine — neither adding a member nor promoting one bumps the

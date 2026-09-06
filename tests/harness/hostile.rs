@@ -50,6 +50,15 @@ pub struct Hostility {
     pub forge_envelope_epoch: AtomicU64,
     /// Who the forged envelope is sealed to (the victim's public kex key).
     pub forge_envelope_recipient: std::sync::Mutex<Option<[u8; 32]>>,
+    /// Serve the frame from the *first* backlog entry in place of the one
+    /// really stored at this seq, stored as `seq + 1` so `0` can mean "off".
+    ///
+    /// Distinct from `replay_update_as_seq`, which appends a duplicate
+    /// *alongside* the real frame: there the genuine content still arrives and
+    /// retires the seq. This substitutes, which is the shape that matters —
+    /// the relay hides an update and covers the gap with one it already served,
+    /// so a client counting sequences advances over content it never received.
+    pub substitute_update_seq: AtomicU64,
     /// Withhold every key envelope for this epoch, stored as `epoch + 1` so
     /// that `0` can mean "off". Models a relay that simply does not hand a
     /// member the rotated key — the state in which a client must refuse to fall
@@ -80,6 +89,11 @@ impl Hostility {
 
     pub fn replay_update_once_as(&self, seq: u64) {
         self.replay_update_as_seq.store(seq, Ordering::Relaxed);
+    }
+
+    pub fn substitute_update_seq(&self, seq: u64) {
+        self.substitute_update_seq
+            .store(seq + 1, Ordering::Relaxed);
     }
 
     pub fn withhold_envelope_epoch(&self, epoch: u32) {
@@ -336,6 +350,17 @@ impl Store for HostileStore {
                     Ordering::Relaxed,
                 );
                 break;
+            }
+        }
+        if let stored @ 1.. = self.hostility.substitute_update_seq.load(Ordering::Relaxed) {
+            let target = stored - 1;
+            if let Some((_, first)) = updates.first().cloned() {
+                for (seq, bytes) in &mut updates {
+                    if *seq == target {
+                        *bytes = first;
+                        break;
+                    }
+                }
             }
         }
         let replay_seq = self.hostility.replay_update_as_seq.load(Ordering::Relaxed);

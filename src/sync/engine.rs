@@ -61,6 +61,12 @@ const MAX_DEFERRED_FRAMES: usize = 1024;
 /// rotation ahead is ordinary; a stack of them is a relay inventing epochs.
 const MAX_ENVELOPES_AHEAD: u32 = 4;
 
+/// Frames per doc whose content is remembered for duplicate detection. Ample:
+/// docs are compacted every few hundred updates, and frames at or below a
+/// snapshot's coverage are skipped before they ever reach this. Past it the doc
+/// stops authoring snapshots rather than tracking without bound.
+const MAX_TRACKED_FRAME_DIGESTS: usize = 4096;
+
 /// Envelopes held above the log's epoch before new ones are refused. Bounded
 /// for the same reason the deferred-frame queue is: the relay chooses how many
 /// of these to send, and it can send them unsolicited.
@@ -162,6 +168,16 @@ struct DocState {
     /// `have_seq` pins below the first deferred frame forever — every reconnect
     /// re-downloads the same backlog and the compaction threshold never fires.
     deferred: Vec<(u64, UpdateFrame)>,
+    /// Content digests of the frames already incorporated, and the seq each
+    /// arrived under. The relay assigns sequence numbers after the fact, so
+    /// nothing binds a frame to one — this is the only way to notice the same
+    /// frame being served twice to cover a seq that was never sent.
+    applied_digests: HashMap<[u8; 32], u64>,
+    /// Set when this replica can no longer prove it holds what its frontier
+    /// claims: a duplicate turned up, or the digest budget ran out. Purely a
+    /// gate on *authoring* snapshots — the doc keeps syncing, it just stops
+    /// volunteering coverage it cannot stand behind.
+    coverage_unverifiable: bool,
     /// Set when the deferred queue overflowed and a frame was refused. The
     /// replica may now be missing content it will only get back from a
     /// resubscribe, so it must not author a snapshot in the meantime: a
@@ -895,6 +911,8 @@ impl Engine {
             requested_snapshot: None,
             snapshot_asked: None,
             deferred: Vec::new(),
+            applied_digests: HashMap::new(),
+            coverage_unverifiable: false,
             lost_frames: false,
             live: false,
             busy: false,
@@ -1631,6 +1649,64 @@ impl Engine {
         self.membership_inflight.remove(&space_id);
     }
 
+    /// Retire `seq` against `frame`, unless the relay has served this frame
+    /// before under a different one. Returns whether the plaintext should be
+    /// handed on.
+    ///
+    /// A sequence number means "I hold what the relay stored at N". Counting
+    /// alone cannot support that: the relay picks the numbers, so it can serve a
+    /// frame it already served, skip whatever really sat at N, and watch the
+    /// frontier advance over content nobody ever sent. The client would then
+    /// sign a snapshot claiming to cover it, and the GC would delete the
+    /// original — the loss made permanent by the victim's own signature.
+    fn incorporate(&mut self, doc_id: Uuid, seq: u64, frame: &UpdateFrame) -> bool {
+        let digest = crypto::update_frame_digest(frame);
+        let own = frame.author_identity == self.identity.identity_pk();
+        let Some(doc) = self.docs.get_mut(&doc_id) else {
+            return false;
+        };
+        match doc.applied_digests.get(&digest).copied() {
+            // Same frame, same seq: an ordinary re-delivery (a resubscribe, or
+            // a `Resync` that rewound the frontier). Nothing to say.
+            Some(first) if first == seq => {}
+            Some(first) => {
+                // Whatever the cause, this replica can no longer prove it holds
+                // what its frontier claims, so it must stop offering snapshots.
+                doc.coverage_unverifiable = true;
+                if own {
+                    // Ours, and we re-push unacked frames on reconnect: if the
+                    // relay restarted, its in-memory push dedup went with it and
+                    // the retry appended a second copy. Harmless in itself —
+                    // applying it twice is a no-op — so the seq is still retired
+                    // and sync carries on.
+                    log::debug!(
+                        "doc {doc_id}: own frame from seq {first} stored again as seq {seq}"
+                    );
+                } else {
+                    // Not ours, and we have no way to produce someone else's
+                    // frame a second time. Leaving the seq un-retired is what
+                    // lets a resubscribe ask for the real content again.
+                    self.warn_security(format!(
+                        "doc {doc_id}: relay served the frame from seq {first} again as \
+                         seq {seq}; refusing to retire a sequence it has not supplied"
+                    ));
+                    return false;
+                }
+            }
+            None => {
+                if doc.applied_digests.len() < MAX_TRACKED_FRAME_DIGESTS {
+                    doc.applied_digests.insert(digest, seq);
+                } else {
+                    // Past the budget a duplicate could slip by unnoticed, so
+                    // the coverage claim stops being one we can make.
+                    doc.coverage_unverifiable = true;
+                }
+            }
+        }
+        self.note_seq(doc_id, seq);
+        true
+    }
+
     fn note_seq(&mut self, doc_id: Uuid, seq: u64) {
         let Some(doc) = self.docs.get_mut(&doc_id) else {
             return;
@@ -1697,7 +1773,9 @@ impl Engine {
         };
         match crypto::open_update(&frame, key, &space_id, &doc_id) {
             Ok(plaintext) => {
-                self.note_seq(doc_id, seq);
+                if !self.incorporate(doc_id, seq, &frame) {
+                    return;
+                }
                 // A device never moves its own remote caret from an echo.
                 let caret_author = (live && !own).then_some(frame.author_identity);
                 self.emit(SyncEvent::DocBytes {
@@ -1865,6 +1943,7 @@ impl Engine {
         // problem and become everyone's, permanently.
         if (server_asked || threshold_crossed)
             && !doc.lost_frames
+            && !doc.coverage_unverifiable
             && have > 0
             && doc.snapshot_asked.is_none_or(|asked| have > asked)
         {
@@ -2196,7 +2275,9 @@ impl Engine {
         match crypto::open_update(&frame, key, &space_id, &doc_id) {
             // Deferred (was undecryptable): no longer "live", so no caret jump.
             Ok(plaintext) => {
-                self.note_seq(doc_id, seq);
+                if !self.incorporate(doc_id, seq, &frame) {
+                    return;
+                }
                 self.emit(SyncEvent::DocBytes {
                     doc_id,
                     update: plaintext,
