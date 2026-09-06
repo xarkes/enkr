@@ -50,6 +50,11 @@ pub struct Hostility {
     pub forge_envelope_epoch: AtomicU64,
     /// Who the forged envelope is sealed to (the victim's public kex key).
     pub forge_envelope_recipient: std::sync::Mutex<Option<[u8; 32]>>,
+    /// Withhold every key envelope for this epoch, stored as `epoch + 1` so
+    /// that `0` can mean "off". Models a relay that simply does not hand a
+    /// member the rotated key — the state in which a client must refuse to fall
+    /// back to the epoch the removed member still holds.
+    pub withhold_envelope_epoch: AtomicU64,
     /// Serve this membership log instead of the real one. `Create` is
     /// self-signed, so an attacker can mint a wholly valid log for a space they
     /// have nothing to do with — the substitution a client must refuse.
@@ -75,6 +80,11 @@ impl Hostility {
 
     pub fn replay_update_once_as(&self, seq: u64) {
         self.replay_update_as_seq.store(seq, Ordering::Relaxed);
+    }
+
+    pub fn withhold_envelope_epoch(&self, epoch: u32) {
+        self.withhold_envelope_epoch
+            .store(epoch as u64 + 1, Ordering::Relaxed);
     }
 
     pub fn substitute_membership_log(&self, ops: Vec<Vec<u8>>) {
@@ -245,6 +255,9 @@ impl Store for HostileStore {
         identity_pk: &IdentityPk,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
         let mut envelopes = self.inner.envelopes_for_identity(space_id, identity_pk).await?;
+        if let withheld @ 1.. = self.hostility.withhold_envelope_epoch.load(Ordering::Relaxed) {
+            envelopes.retain(|(epoch, _)| *epoch != (withheld - 1) as u32);
+        }
         let forged = match self.hostility.forge_envelope_epoch.load(Ordering::Relaxed) {
             0 => return Ok(envelopes),
             stored => (stored - 1) as u32,

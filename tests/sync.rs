@@ -1760,6 +1760,75 @@ async fn a_substituted_membership_log_is_refused() {
     assert!(warned, "a substituted log was refused without telling anyone");
 }
 
+/// A client missing the rotated key must write nothing, not fall back.
+///
+/// The point of bumping the epoch on a removal is that the removed member keeps
+/// the old key and must not be able to read anything written afterwards. A
+/// member whose rotated envelope has not arrived — because the relay is slow, or
+/// because it is withholding it on purpose — and which quietly seals under the
+/// previous epoch hands the removed member exactly what the rotation was for.
+/// Failing closed costs nothing: the edits stay queued and the client chases the
+/// missing envelope.
+#[tokio::test]
+async fn a_client_without_the_rotated_key_seals_nothing() {
+    let (server, hostility) = TestServer::start_hostile(ServerConfig::default()).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "before;").await.unwrap();
+    owner.flush().await.unwrap();
+
+    let victim = server.client();
+    wait_connected(&victim).await;
+    invite_and_join(&owner, &victim, space).await;
+    victim.open_doc(space, doc).await.unwrap();
+
+    let evictee = server.client();
+    wait_connected(&evictee).await;
+    invite_and_join(&owner, &evictee, space).await;
+    converge(&[&owner, &victim], doc).await;
+
+    let epoch_zero_rows = |server: &TestServer| -> i64 {
+        server
+            .raw_db()
+            .query_row("SELECT COUNT(*) FROM updates WHERE epoch = 0", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let before_rotation = epoch_zero_rows(&server);
+
+    // The rotation happens, but the victim never receives the epoch-1 envelope.
+    hostility.withhold_envelope_epoch(1);
+    owner
+        .remove_member(space, evictee.identity_pk())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Now the victim edits. Its own log says the space is at epoch 1; it holds
+    // only the epoch-0 key, which the evictee also still holds.
+    victim.insert_text(doc, 0, "after-rotation;").await.unwrap();
+    let _ = victim.flush().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert_eq!(
+        epoch_zero_rows(&server),
+        before_rotation,
+        "an edit was sealed under the revoked epoch the removed member can read"
+    );
+
+    // Failing closed must not mean losing the edit: it is still buffered,
+    // waiting for a key that a healthy relay would have sent.
+    let status = victim.status().await.unwrap();
+    assert!(
+        status.pending_docs > 0,
+        "the held edit was dropped rather than queued"
+    );
+}
+
 /// A frame parked for a later retry must still retire its sequence.
 ///
 /// Deferral is routine — neither adding a member nor promoting one bumps the

@@ -208,6 +208,9 @@ struct SpaceState {
     /// attack.
     confirmed_ops: usize,
     confirmed_digest: [u8; 32],
+    /// The epoch we last reported being unable to seal under, so a stall is
+    /// announced once rather than on every debounce tick.
+    stalled_epoch: Option<u32>,
 }
 
 impl SpaceState {
@@ -221,21 +224,27 @@ impl SpaceState {
         self.membership.current_epoch
     }
 
-    /// The key new content is sealed under: the newest one at or below the
-    /// authenticated ceiling.
+    /// The key new content is sealed under: the one for the epoch the signed
+    /// log says is current, or nothing.
     ///
-    /// Deliberately not `keys.last()`. A space key envelope is an anonymous
-    /// X25519 sealed box — sealing one needs nothing but the recipient's public
-    /// kex key, which is public in the membership log — so anybody who can put
-    /// bytes on this connection can offer a key that unseals cleanly. Picking
-    /// the numerically-highest epoch would let them hand us a key for an epoch
-    /// that never happened and have us encrypt everything under it.
+    /// Exact, and both halves of that matter.
+    ///
+    /// Not the numerically-highest key we hold: a space key envelope is an
+    /// anonymous X25519 sealed box — sealing one needs nothing but the
+    /// recipient's public kex key, which is public in the membership log — so
+    /// anybody who can put bytes on this connection can offer a key that
+    /// unseals cleanly, for an epoch that never happened.
+    ///
+    /// And not the newest key at or *below* the current epoch either. That
+    /// looks like a harmless fallback and is the opposite: the whole purpose of
+    /// a rotation is that the member who was just removed keeps the old key and
+    /// must not be able to read anything written after their removal. A client
+    /// that has not yet received the rotated envelope and quietly seals under
+    /// the previous epoch hands them exactly that. Better to write nothing —
+    /// the edits stay queued, and `flush_doc` chases the missing envelope.
     fn sealing_key(&self) -> Option<(u32, &SpaceKey)> {
-        let ceiling = self.authorised_epoch();
-        self.keys
-            .range(..=ceiling)
-            .next_back()
-            .map(|(e, k)| (*e, k))
+        let epoch = self.authorised_epoch();
+        self.keys.get(&epoch).map(|key| (epoch, key))
     }
 }
 
@@ -772,10 +781,30 @@ impl Engine {
             }
             return;
         }
-        let Some((epoch, key)) = space.sealing_key() else {
+        let sealing = space.sealing_key().map(|(epoch, key)| (epoch, key.clone()));
+        let authorised = space.authorised_epoch();
+        let already_reported = space.stalled_epoch == Some(authorised);
+        let Some((epoch, key)) = sealing else {
+            // Behind the rotation: the log says the space has moved to an epoch
+            // whose envelope has not reached us. The edits stay queued — this
+            // returns before the buffer is drained — but nothing else would ask
+            // for the missing key while the client is otherwise idle, so chase
+            // it here rather than stalling in silence.
+            if let Some(space) = self.spaces.get_mut(&space_id) {
+                space.stalled_epoch = Some(authorised);
+            }
+            self.request_envelopes(space_id).await;
+            if !already_reported {
+                self.warn_security(format!(
+                    "space {space_id}: no key for the current epoch {authorised}; \
+                     edits are held rather than sealed under a revoked key"
+                ));
+            }
             return;
         };
-        let (epoch, key) = (epoch, key.clone());
+        if let Some(space) = self.spaces.get_mut(&space_id) {
+            space.stalled_epoch = None;
+        }
         let doc = self.docs.get_mut(&doc_id).unwrap();
         let updates = std::mem::take(&mut doc.pending.updates);
         doc.pending.bytes = 0;
@@ -1109,6 +1138,7 @@ impl Engine {
                 parked_envelopes: Vec::new(),
                 confirmed_ops: 0,
                 confirmed_digest: [0u8; 32],
+                stalled_epoch: None,
             },
         );
 
@@ -2019,6 +2049,7 @@ impl Engine {
             parked_envelopes: Vec::new(),
             confirmed_ops: 0,
             confirmed_digest: [0u8; 32],
+            stalled_epoch: None,
         });
         let room = MAX_PARKED_ENVELOPES.saturating_sub(space.parked_envelopes.len());
         space.parked_envelopes.extend(envelopes.into_iter().take(room));
@@ -2226,6 +2257,7 @@ impl Engine {
                     parked_envelopes: Vec::new(),
                     confirmed_ops: 0,
                     confirmed_digest: [0u8; 32],
+                    stalled_epoch: None,
                 });
                 space.current_epoch = space
                     .current_epoch
