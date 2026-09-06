@@ -2143,6 +2143,140 @@ async fn the_relay_stores_a_repeated_frame_at_one_sequence() {
     assert_eq!(rows, 1, "the frame was stored more than once");
 }
 
+/// A padded membership op must not reach the log.
+///
+/// `postcard::from_bytes` ignores whatever follows the value it decoded, so an
+/// author can append a megabyte to a fifty-byte op, sign the whole thing, and
+/// have every verifier accept it. The relay stores those bytes verbatim, bills
+/// nobody for them, and hands the entire log back in one `Membership` message —
+/// so one padded op is enough to push that message past the transport ceiling
+/// and leave the space unjoinable, permanently, for everybody.
+#[tokio::test]
+async fn a_padded_membership_op_is_refused() {
+    use enkr_proto::crypto::Identity;
+    use enkr_proto::membership::{MembershipOp, MembershipOpKind};
+    use enkr_proto::wire::{ClientMsg, ErrorCode, ServerMsg, SignedMembershipOp};
+    use enkr_proto::wire;
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let server = TestServer::start_default().await;
+    let dev = Identity::generate();
+    let url = server.url();
+    let mut ws = raw_conn(&url, &dev).await;
+
+    let space = Uuid::new_v4();
+    let op = MembershipOp {
+        space_id: space,
+        op_seq: 0,
+        kind: MembershipOpKind::Create {
+            creator_kex: dev.kex_pk(),
+            key_commitment: [0u8; 32],
+        },
+    };
+    let mut op_bytes = wire::encode(&op).unwrap();
+    let honest = op_bytes.len();
+    op_bytes.extend(std::iter::repeat_n(0u8, 512 * 1024));
+    // Signed over the padding as well, so the signature is genuinely valid.
+    let padded = SignedMembershipOp {
+        author_identity: dev.identity_pk(),
+        sig: dev.sign(&op_bytes).to_vec(),
+        op_bytes,
+    };
+    assert!(padded.op_bytes.len() > honest * 1000);
+
+    ws.send(Message::Binary(
+        wire::encode(&ClientMsg::CreateSpace {
+            space_id: space,
+            signed_op: padded,
+            envelopes: vec![],
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    // `CreateSpace` says nothing on success, so acceptance and refusal both
+    // look like silence. Ping behind it and read to the Pong.
+    ws.send(Message::Binary(
+        wire::encode(&ClientMsg::Ping).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+    let mut refused = false;
+    loop {
+        match recv_msg(&mut ws).await {
+            ServerMsg::Error {
+                code: ErrorCode::BadSignature,
+                ..
+            } => refused = true,
+            ServerMsg::Pong => break,
+            other => panic!("unexpected reply while awaiting the barrier: {other:?}"),
+        }
+    }
+    assert!(refused, "the relay accepted a padded membership op");
+
+    let stored: i64 = server
+        .raw_db()
+        .query_row("SELECT COUNT(*) FROM membership_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, 0, "a padded op reached the membership log");
+}
+
+/// The membership log must stop growing before it outgrows the message that
+/// carries it.
+#[tokio::test]
+async fn the_membership_log_stops_at_its_cap() {
+    let mut config = ServerConfig::default();
+    // Create + two adds, then the door shuts.
+    config.max_membership_ops = 3;
+    let server = TestServer::start(config).await;
+
+    let owner = server.client();
+    wait_connected(&owner).await;
+    let space = owner.create_space().await.unwrap();
+
+    let first = server.client();
+    wait_connected(&first).await;
+    invite_and_join(&owner, &first, space).await;
+    let second = server.client();
+    wait_connected(&second).await;
+    invite_and_join(&owner, &second, space).await;
+
+    // The log is now full: Create + two Adds. The next change is refused, and
+    // refused *server*-side — the owner's client applies ops optimistically, so
+    // the store is what has to be checked.
+    let third = server.client();
+    wait_connected(&third).await;
+    let _ = owner
+        .add_member(
+            space,
+            third.identity_pk(),
+            third.kex_pk(),
+            MemberRole::Writer,
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ops: i64 = server
+        .raw_db()
+        .query_row(
+            "SELECT COUNT(*) FROM membership_log WHERE space_id = ?",
+            [&space.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ops, 3, "the log grew past its cap");
+
+    // And the space still works for the members it has.
+    let doc = owner.create_doc(space).await.unwrap();
+    owner.insert_text(doc, 0, "still usable;").await.unwrap();
+    owner.flush().await.unwrap();
+    first.open_doc(space, doc).await.unwrap();
+    let text = converge(&[&owner, &first], doc).await;
+    assert!(text.contains("still usable;"));
+}
+
 /// A frame parked for a later retry must still retire its sequence.
 ///
 /// Deferral is routine — neither adding a member nor promoting one bumps the
